@@ -1,0 +1,35 @@
+[project]
+name = "dhaka-kacchi-harness"
+version = "0.1.0"
+description = "Dhaka Kacchi AI harness - Layer 0 warehouse"
+requires-python = ">=3.12"
+dependencies = [
+    "alembic>=1.19,<2",
+    "sqlalchemy>=2.0.52,<2.1",
+    "psycopg[binary]>=3.3,<4",
+    "python-dotenv>=1.2,<2",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14",
+    "pytest>=8.4",
+]
+
+[tool.uv]
+# This repo is an application, not a distributable library: do not build and
+# install `warehouse` into the venv. Modules import from the repo root, which
+# is put on sys.path by `prepend_sys_path` in alembic.ini.
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# Migrations carry long inline DDL strings and a wide helper import preamble.
+"warehouse/migrations/versions/*" = ["E501"]
+"warehouse/migrations/env.py" = ["E402"]
