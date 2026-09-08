@@ -15,6 +15,12 @@ make gate       # run the ARCHITECTURE.md section 9 Phase-1 exit gate
 
 Requires a running PostgreSQL 13+ and [uv](https://docs.astral.sh/uv/).
 
+Paste the full URL if DataGrip's "From URL" option is available:
+
+```bash
+jdbc:postgresql://127.0.0.1:5432/dhaka_kacchi?user=shadman.arko
+```
+
 ## Exploring the data
 
 Connect any SQL client (DataGrip, `psql`, TablePlus) to `DATABASE_URL` in `.env`.
