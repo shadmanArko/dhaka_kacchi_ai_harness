@@ -6,10 +6,49 @@
 
 `warehouse/` is Layer 0. `migrations/` is the Alembic chain, `config.py` is the ONE
 place that reads `os.environ`, `verify.py` enforces schema conventions, `gate.py`
-runs the §9 Phase-1 exit gate. `tools/ agents/ control/ brain/ ops/` are stubs per
-Appendix A.
+runs the §9 Phase-1 exit gate, `ingest/` holds one idempotent job per source per
+§4.1 (`direct.py` is the first — see below). `tools/ agents/ control/ brain/ ops/`
+are stubs per Appendix A.
 
-Run `make help`. Common: `make upgrade`, `make verify`, `make gate`, `make reset`.
+Run `make help`. Common: `make upgrade`, `make verify`, `make gate`, `make reset`,
+`make ingest-direct`.
+
+## Ingestion
+
+The ordering backend (`dhaka-kacchi-connect`, a sibling repo) is **not deployed
+anywhere** — `wrangler.toml`'s `database_id` is still the placeholder
+`REPLACE_WITH_D1_DATABASE_ID`, `worker/` isn't committed to git, and the only D1
+data anywhere is a handful of local Miniflare dev/test rows. `warehouse/ingest/
+direct.py` deliberately targets that local dev D1 via `npx wrangler d1 execute
+--local --json`, run with `cwd` in the sibling repo's `worker/` directory —
+switching to production later is a one-value change
+(`DHAKA_KACCHI_D1_TARGET=remote` in `.env`), not a rebuild. Path to the sibling
+repo is `DHAKA_KACCHI_CONNECT_PATH`, validated fail-fast the same way
+`DATABASE_URL` is.
+
+`make ingest-direct-dry-run` extracts and prints without writing anything —
+useful before the first real run, since `--local` ingests *everything* currently
+in local dev D1, test rows included. `make verify-ingest-direct` proves
+idempotency by running the job twice and asserting identical row counts, plus a
+hand-computed COGS spot check. See `warehouse/ingest/direct.py`'s module
+docstring and `warehouse/ingest/direct_verify.py` for the full design.
+
+**A real bug this surfaced, worth remembering:** the `0012` seed originally let
+`recipe.active_from` default to `NOW()` at migration time. Point-in-time COGS
+correctly — but unhelpfully — found *no* active recipe for any order placed
+before the seed ran, silently producing `unit_cogs_at_time = 0` for every
+historical order. Fixed by giving the baseline (version 1) recipe an explicit
+`BASELINE_RECIPE_ACTIVE_FROM = '2020-01-01'` in `0012_seed.py`, on the reasoning
+that a baseline recipe should be treated as always having been true, not as
+having become true at deploy time — a real version change later gets a real
+`active_from` at the moment it actually changed. The already-applied database
+was corrected with a deliberate one-off `UPDATE recipe SET active_from = ...`
+(never a silent migration-driven rewrite — matches the "corrections must be
+deliberate" philosophy already in the recipe/order_line comments). The
+`_cogs_for_sku` warning in `direct.py` that prints `resolved to zero COGS` is
+what caught this — don't remove it as noise; a menu item resolving to exactly 0
+is either this class of bug or the known salad/chutney recipe gap, never a
+value to ignore silently.
 
 ## Schema conventions (enforced by `make verify`, not by convention alone)
 

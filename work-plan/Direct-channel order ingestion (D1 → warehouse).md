@@ -66,10 +66,12 @@ duplication genuinely painful.
 ```python
 create_table_if_absent(
     "raw_orders_direct",
-    pk_column(), pk_constraint("raw_orders_direct"),
-    sa.Column("external_id", TEXT, nullable=False),   # D1 orders.id, 'ord_<uuid>'
-    sa.Column("payload", JSONB, nullable=False),       # verbatim order + nested items[]
-    created_at_column(), updated_at_column(),
+    pk_column(),
+    pk_constraint("raw_orders_direct"),
+    sa.Column("external_id", TEXT, nullable=False),  # D1 orders.id, 'ord_<uuid>'
+    sa.Column("payload", JSONB, nullable=False),  # verbatim order + nested items[]
+    created_at_column(),
+    updated_at_column(),
     sa.UniqueConstraint("external_id", name=uq("raw_orders_direct", "external_id")),
 )
 ```
@@ -99,8 +101,18 @@ Fail-fast validation mirrors `load_settings()`: resolve the path, confirm
 
 One query (`orders LEFT JOIN order_items`, `ORDER BY created_at, o.id, oi.id`) via:
 ```python
-["npx", "--yes", "wrangler", "d1", "execute", cfg.d1_database_name,
- f"--{cfg.d1_target}", "--json", "--command", WRANGLER_D1_QUERY]
+[
+    "npx",
+    "--yes",
+    "wrangler",
+    "d1",
+    "execute",
+    cfg.d1_database_name,
+    f"--{cfg.d1_target}",
+    "--json",
+    "--command",
+    WRANGLER_D1_QUERY,
+]
 ```
 run with `cwd=cfg.worker_dir` (confirmed required — `npx` resolves the *pinned*
 `worker/node_modules/wrangler`, not a freshly-fetched one, only when cwd is right),

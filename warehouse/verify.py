@@ -36,6 +36,7 @@ EXPECTED_TABLES = frozenset(
         "ad_spend",
         "cockpit_alert",
         "agent_action",
+        "raw_orders_direct",
     }
 )
 

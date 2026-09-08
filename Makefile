@@ -10,7 +10,8 @@ SCHEMA_HEAD := 0011
 SEED_REV    := 0012
 
 .PHONY: help install env db upgrade schema seed reseed downgrade reset nuke \
-        verify verify-idempotent gate current history sql psql revision lint fmt
+        verify verify-idempotent gate ingest-direct ingest-direct-dry-run \
+        verify-ingest-direct current history sql psql revision lint fmt
 
 help:  ## show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -70,6 +71,15 @@ verify-idempotent: upgrade  ## prove every migration survives a replay over a li
 
 gate:  ## run the ARCHITECTURE.md section 9 exit-gate query
 	$(PY) -m warehouse.gate
+
+ingest-direct:  ## pull orders from the direct ordering backend (D1) into the warehouse
+	$(PY) -m warehouse.ingest.direct
+
+ingest-direct-dry-run:  ## show what ingest-direct would write, without writing
+	$(PY) -m warehouse.ingest.direct --dry-run
+
+verify-ingest-direct:  ## prove ingest-direct is idempotent and COGS-correct
+	$(PY) -m warehouse.ingest.direct_verify
 
 current:  ## which revision is applied
 	$(ALEMBIC) current --verbose

@@ -64,6 +64,14 @@ def _text_array(values: Sequence[str]) -> sa.sql.ColumnElement:
     return sa.cast(sa.literal("{" + inner + "}", TEXT), TEXT_ARRAY)
 
 
+def _timestamptz(value: str) -> sa.sql.ColumnElement:
+    """Render CAST('...' AS TIMESTAMPTZ), offline-safe for the same reason: a
+    bare Python str bound to a TIMESTAMPTZ column has no literal renderer under
+    literal_binds=True.
+    """
+    return sa.cast(sa.literal(value, TEXT), TIMESTAMPTZ)
+
+
 revision: str = "0012"
 down_revision: str | Sequence[str] | None = "0011"
 branch_labels: str | Sequence[str] | None = None
@@ -136,8 +144,19 @@ recipe = sa.table(
     sa.column("qty", QTY),
     sa.column("yield_factor", YIELD),
     sa.column("version", sa.Integer),
+    sa.column("active_from", TIMESTAMPTZ),
     sa.column("updated_at", TIMESTAMPTZ),
 )
+
+# The baseline (version 1) recipe is treated as having always been true, not as
+# having become true at whatever moment this migration happened to run. Without
+# an explicit active_from, the column's server_default=NOW() would stamp
+# "seeded just now," which makes the point-in-time COGS join in
+# warehouse/ingest/direct.py correctly - but unhelpfully - find NO active
+# recipe for any order placed before the seed ran, including every real order
+# that predates a schema rebuild. A real recipe VERSION CHANGE later gets a
+# real active_from at the moment it actually changed; this is not that case.
+BASELINE_RECIPE_ACTIVE_FROM = "2020-01-01T00:00:00+01:00"
 
 SUPPLIER_ROWS = [
     # Named in the section 3.1 worked example.
@@ -276,14 +295,17 @@ def upgrade() -> None:
                 "qty": Decimal(qty),
                 "yield_factor": Decimal(yield_factor),
                 "version": 1,
+                "active_from": _timestamptz(BASELINE_RECIPE_ACTIVE_FROM),
                 "updated_at": now,
             }
             for menu_slug, ing_slug, qty, yield_factor in RECIPE_ROWS
         ],
         conflict_on=["menu_item_id", "ingredient_id", "version"],
-        # active_from is deliberately absent: changing it could trip
-        # excl_recipe_no_overlap, and it SHOULD fail loudly rather than silently
-        # rewrite a historical window. A recipe change is a version bump.
+        # active_from is set on first insert (BASELINE_RECIPE_ACTIVE_FROM) but
+        # deliberately absent from `update`: changing it on an existing row
+        # could trip excl_recipe_no_overlap, and it SHOULD fail loudly rather
+        # than silently rewrite a historical window. A recipe change is a
+        # version bump, not an edit to version 1's start date.
         update=["qty", "yield_factor", "updated_at"],
     )
 

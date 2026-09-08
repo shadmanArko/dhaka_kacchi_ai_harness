@@ -96,6 +96,61 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
     )
 
 
+_D1_TARGETS = frozenset({"local", "remote"})
+
+
+@dataclass(frozen=True, slots=True)
+class DirectSourceSettings:
+    """Config for the direct-channel (D1) ingest job only.
+
+    Loaded separately from Settings, on purpose: Settings/load_settings() is
+    called by bootstrap_db.py, verify.py, gate.py and migrations/env.py - none
+    of which have anything to do with the ordering backend. Forcing every one
+    of those to require a checked-out sibling repo just to run `make verify`
+    would be wrong.
+    """
+
+    worker_dir: Path  # dhaka-kacchi-connect/worker - the wrangler cwd
+    d1_database_name: str  # 'dhaka-kacchi', matches worker/wrangler.toml
+    d1_target: str  # 'local' | 'remote' - the entire prod switch
+
+
+def load_direct_source_settings(environ: Mapping[str, str] | None = None) -> DirectSourceSettings:
+    """Fail-fast config for warehouse/ingest/direct.py. Same idiom as
+    load_settings(): validate eagerly, raise ConfigError with an actionable
+    message, never return a partially-valid object.
+    """
+    if environ is None:
+        load_dotenv(ENV_FILE, override=False)
+        environ = os.environ
+
+    raw_path = (environ.get("DHAKA_KACCHI_CONNECT_PATH") or "").strip()
+    connect_root = Path(raw_path) if raw_path else (REPO_ROOT.parent / "dhaka-kacchi-connect")
+    connect_root = connect_root.expanduser().resolve()
+    worker_dir = connect_root / "worker"
+    wrangler_toml = worker_dir / "wrangler.toml"
+
+    if not wrangler_toml.is_file():
+        raise ConfigError(
+            f"ordering-backend repo not found at {connect_root}.\n"
+            f"  Expected {wrangler_toml} to exist.\n"
+            "  Set DHAKA_KACCHI_CONNECT_PATH to the dhaka-kacchi-connect "
+            "checkout, or check it out as a sibling of this repo."
+        )
+
+    d1_target = (environ.get("DHAKA_KACCHI_D1_TARGET") or "local").strip().lower()
+    if d1_target not in _D1_TARGETS:
+        raise ConfigError(
+            f"DHAKA_KACCHI_D1_TARGET must be one of {sorted(_D1_TARGETS)}; got {d1_target!r}."
+        )
+
+    return DirectSourceSettings(
+        worker_dir=worker_dir,
+        d1_database_name=(environ.get("DHAKA_KACCHI_D1_DATABASE") or "dhaka-kacchi").strip(),
+        d1_target=d1_target,
+    )
+
+
 def _main(argv: list[str]) -> int:
     """`python -m warehouse.config [print-url]` - used by `make psql`."""
     try:
