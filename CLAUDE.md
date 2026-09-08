@@ -15,23 +15,33 @@ Run `make help`. Common: `make upgrade`, `make verify`, `make gate`, `make reset
 
 ## Ingestion
 
-The ordering backend (`dhaka-kacchi-connect`, a sibling repo) is **not deployed
-anywhere** — `wrangler.toml`'s `database_id` is still the placeholder
-`REPLACE_WITH_D1_DATABASE_ID`, `worker/` isn't committed to git, and the only D1
-data anywhere is a handful of local Miniflare dev/test rows. `warehouse/ingest/
-direct.py` deliberately targets that local dev D1 via `npx wrangler d1 execute
---local --json`, run with `cwd` in the sibling repo's `worker/` directory —
-switching to production later is a one-value change
-(`DHAKA_KACCHI_D1_TARGET=remote` in `.env`), not a rebuild. Path to the sibling
-repo is `DHAKA_KACCHI_CONNECT_PATH`, validated fail-fast the same way
-`DATABASE_URL` is.
+The ordering backend (`dhaka-kacchi-connect`, a sibling repo) was ported off
+Cloudflare Workers/D1 to Node.js + Postgres 2026-09-07/08, specifically so it
+could share one Postgres instance with this warehouse on the VPS — D1 was
+only ever reachable from a Worker or `wrangler`. `warehouse/ingest/direct.py`
+now reads the ordering backend's `orders`/`order_items` tables with two plain
+SQL queries over an ordinary Postgres connection
+(`ORDERING_DATABASE_URL`, validated fail-fast the same way `DATABASE_URL`
+is — see `warehouse/config.py`'s `OrderingSourceSettings`). On the VPS this
+connects as the read-only `ordering_reader` role, never `ordering_app` — this
+job can never write into the live ordering database, structurally, not by
+convention. Locally, point it at a Postgres database seeded by
+`dhaka-kacchi-connect/worker`'s own `npm run db:migrate` (see that repo's
+`worker/CLAUDE.md`).
 
 `make ingest-direct-dry-run` extracts and prints without writing anything —
-useful before the first real run, since `--local` ingests *everything* currently
-in local dev D1, test rows included. `make verify-ingest-direct` proves
-idempotency by running the job twice and asserting identical row counts, plus a
-hand-computed COGS spot check. See `warehouse/ingest/direct.py`'s module
-docstring and `warehouse/ingest/direct_verify.py` for the full design.
+useful before the first real run, since a full extract pulls in *everything*
+currently at the source, test rows included. `make verify-ingest-direct`
+proves idempotency by running the job twice and asserting identical row
+counts, plus a hand-computed COGS spot check. See `warehouse/ingest/
+direct.py`'s module docstring and `warehouse/ingest/direct_verify.py` for the
+full design.
+
+There is still no `updated_at`/cursor-based incremental extraction — every
+run is a full refresh, correctness comes from the upsert layer, not from
+filtering what's read. Fine at current order volume; revisit if it ever
+isn't (the ordering backend's `orders.updated_at` column exists for exactly
+this, unused today).
 
 **A real bug this surfaced, worth remembering:** the `0012` seed originally let
 `recipe.active_from` default to `NOW()` at migration time. Point-in-time COGS

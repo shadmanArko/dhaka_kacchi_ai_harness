@@ -16,7 +16,7 @@ from decimal import Decimal
 
 import sqlalchemy as sa
 
-from warehouse.config import ConfigError, Settings, load_direct_source_settings, load_settings
+from warehouse.config import ConfigError, Settings, load_ordering_source_settings, load_settings
 from warehouse.ingest.direct import run
 
 _failures: list[str] = []
@@ -50,7 +50,7 @@ def _counts(conn: sa.Connection):
 
 
 def run_checks(settings: Settings) -> int:
-    source = load_direct_source_settings()
+    source = load_ordering_source_settings()
     engine = sa.create_engine(settings.sqlalchemy_url, poolclass=sa.pool.NullPool)
 
     try:

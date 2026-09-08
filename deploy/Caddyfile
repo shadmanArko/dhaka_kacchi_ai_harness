@@ -1,0 +1,11 @@
+# Caddy obtains and renews the Let's Encrypt certificate for this domain
+# automatically - no certbot, no renewal cron. Point one DNS A record at
+# this VPS's public IPv4 before this can work: api.dhakakacchi.de.
+#
+# The warehouse gets no route here and is never publicly reachable - it's a
+# CLI job (see docker-compose.yml's `profiles: ["cron"]`), not a service.
+
+api.dhakakacchi.de {
+	reverse_proxy ordering-backend:8787
+	encode gzip
+}

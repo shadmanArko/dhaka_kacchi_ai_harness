@@ -1,10 +1,12 @@
-"""Ingest orders from the direct ordering backend (Cloudflare D1) into the
+"""Ingest orders from the ordering backend's own Postgres database into the
 warehouse. See ARCHITECTURE.md section 4.1 (Ingestion) and Appendix A.
 
-Reads D1 via `npx wrangler d1 execute ... --json`, run from the ordering
-backend's worker/ directory. --local vs --remote is the ENTIRE production
-switch (DHAKA_KACCHI_D1_TARGET) - nothing else in this pipeline changes when
-the ordering backend eventually gets deployed for real.
+Reads two plain tables (orders, order_items) directly from the ordering
+backend's `ordering` database, over a normal Postgres connection, as the
+read-only `ordering_reader` role - see warehouse/config.py's
+OrderingSourceSettings. Both backends share one Postgres instance on the VPS
+(see dhaka_kacchi_ai_harness's VPS infrastructure docs), so this is an
+ordinary cross-database read, not a subprocess or a different protocol.
 
 Idempotent: re-running with nothing new at the source leaves every row count
 unchanged. Run with `make ingest-direct`; preview with `make ingest-direct-dry-run`.
@@ -13,7 +15,6 @@ unchanged. Run with `make ingest-direct`; preview with `make ingest-direct-dry-r
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
@@ -24,9 +25,9 @@ import sqlalchemy as sa
 
 from warehouse.config import (
     ConfigError,
-    DirectSourceSettings,
+    OrderingSourceSettings,
     Settings,
-    load_direct_source_settings,
+    load_ordering_source_settings,
     load_settings,
 )
 from warehouse.ingest.upsert import upsert_returning
@@ -49,17 +50,35 @@ PROMISED_DELIVERY_TIME_LOCAL = time(14, 0)
 # packaging costs are known.
 PLACEHOLDER_PACKAGING_COST_EUR = Decimal("0.50")
 
-WRANGLER_D1_QUERY = (
-    "SELECT o.id, o.created_at, o.delivery_date, o.status, "
-    "o.subtotal_cents, "
-    "oi.sku, oi.unit_price_cents, oi.quantity "
-    "FROM orders o LEFT JOIN order_items oi ON oi.order_id = o.id "
-    "ORDER BY o.created_at, o.id, oi.id"
+# Deliberately excludes customer_name/email/phone, notes, and the street/
+# house-number address fields - see ARCHITECTURE.md section 10's
+# pseudonymisation policy. A future identity-resolution job should read those
+# columns directly (with hashing applied at landing time), as its own job -
+# not smuggled into this margin-ingestion job. Widened vs. the old D1 query to
+# include every column that's safe to keep, per that same table's own
+# comment promising raw payloads are landed "verbatim... so the transform can
+# be re-derived without re-hitting the source."
+_ORDERS_SQL = sa.text(
+    """
+    SELECT id, created_at, delivery_date, fulfillment_type, status,
+           subtotal_cents, delivery_fee_cents, distance_km,
+           address_postal_code, address_city, payment_method,
+           email_sent, whatsapp_sent
+    FROM orders
+    ORDER BY created_at, id
+    """
+)
+_ORDER_ITEMS_SQL = sa.text(
+    """
+    SELECT order_id, sku, name, unit_price_cents, quantity
+    FROM order_items
+    ORDER BY order_id, id
+    """
 )
 
 
 class ExtractionError(RuntimeError):
-    """The D1 read failed in a way the operator must act on. Never caught."""
+    """The source read failed in a way the operator must act on. Never caught."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,104 +93,39 @@ class RunResult:
 # ---------------------------------------------------------------------------
 
 
-def _run_wrangler(cfg: DirectSourceSettings) -> list[dict]:
-    cmd = [
-        "npx",
-        "--yes",
-        "wrangler",
-        "d1",
-        "execute",
-        cfg.d1_database_name,
-        f"--{cfg.d1_target}",
-        "--json",
-        "--command",
-        WRANGLER_D1_QUERY,
-    ]
-    try:
-        proc = subprocess.run(cmd, cwd=cfg.worker_dir, capture_output=True, text=True, timeout=60)
-    except FileNotFoundError as exc:
-        raise ExtractionError(
-            "`npx` was not found on PATH. Install Node.js (bundles npm/npx), "
-            "confirm `npx --version` works, then retry."
-        ) from exc
-    except subprocess.TimeoutExpired as exc:
-        raise ExtractionError(
-            f"wrangler d1 execute did not finish within {exc.timeout}s. "
-            "Check that the ordering-backend's local D1 state isn't wedged."
-        ) from exc
-    return _parse_wrangler_json(proc)
+def extract(source: OrderingSourceSettings) -> list[dict]:
+    """Full extract every run - orders.updated_at exists (see worker/schema.sql)
+    but nothing here filters on it yet; at this order volume that's fine,
+    correctness comes from the upsert layer below, not from incremental
+    extraction. Revisit once volume makes a full refresh too slow.
 
-
-def _parse_wrangler_json(proc: subprocess.CompletedProcess[str]) -> list[dict]:
-    try:
-        parsed = json.loads(proc.stdout)
-    except json.JSONDecodeError as exc:
-        raise ExtractionError(
-            "wrangler did not return valid JSON on stdout.\n"
-            f"  exit={proc.returncode} stderr={proc.stderr[:500]!r}\n"
-            f"  stdout[:500]={proc.stdout[:500]!r}"
-        ) from exc
-
-    if isinstance(parsed, dict) and "error" in parsed:
-        text = str(parsed["error"].get("text", parsed["error"]))
-        if "no such table" in text.lower():
-            raise ExtractionError(
-                f"D1 has no orders/order_items table ({text}).\n"
-                "  Local D1 state was never initialised. Run, inside worker/:\n"
-                "  npm run db:migrate:local   (or db:migrate:remote for --remote)"
-            )
-        if "couldn't find a d1 db" in text.lower():
-            raise ExtractionError(
-                f"wrangler could not resolve the D1 binding ({text}).\n"
-                "  Check DHAKA_KACCHI_CONNECT_PATH / worker/wrangler.toml."
-            )
-        raise ExtractionError(f"D1 query failed: {text}")
-
-    if not isinstance(parsed, list) or not parsed or "results" not in parsed[0]:
-        raise ExtractionError(f"unexpected wrangler --json shape: {str(parsed)[:500]!r}")
-    if not parsed[0].get("success", False):
-        raise ExtractionError(f"D1 query reported success=false: {parsed[0]}")
-    return parsed[0]["results"]
-
-
-def _group_into_orders(rows: list[dict]) -> list[dict]:
-    """Flat orders-LEFT-JOIN-order_items rows -> nested per-order dicts.
-
-    line_no comes from POSITION in this already-`ORDER BY oi.id`-sorted list,
-    not from D1's own order_items.id (a source-internal autoincrement, not
-    something to expose as identity in the warehouse).
+    Two plain queries, not a join: this connection is read-only
+    (`ordering_reader`), and un-flattening a LEFT JOIN server-side is no
+    longer needed now that there's no per-invocation subprocess cost to
+    amortize by joining.
     """
-    orders: dict[str, dict] = {}
-    for row in rows:
-        order = orders.setdefault(
-            row["id"],
+    engine = sa.create_engine(source.sqlalchemy_url, poolclass=sa.pool.NullPool)
+    try:
+        with engine.connect() as conn:
+            order_rows = conn.execute(_ORDERS_SQL).mappings().all()
+            item_rows = conn.execute(_ORDER_ITEMS_SQL).mappings().all()
+    finally:
+        engine.dispose()
+
+    orders: dict[str, dict] = {row["id"]: {**dict(row), "items": []} for row in order_rows}
+    for row in item_rows:
+        order = orders.get(row["order_id"])
+        if order is None:
+            continue  # order_items row with no matching orders row - not this job's problem
+        order["items"].append(
             {
-                "id": row["id"],
-                "created_at": row["created_at"],
-                "delivery_date": row["delivery_date"],
-                "status": row["status"],
-                "subtotal_cents": row["subtotal_cents"],
-                "items": [],
-            },
+                "sku": row["sku"],
+                "name": row["name"],
+                "unit_price_cents": row["unit_price_cents"],
+                "quantity": row["quantity"],
+            }
         )
-        if row["sku"] is not None:  # LEFT JOIN guard: an item-less order stays visible
-            order["items"].append(
-                {
-                    "sku": row["sku"],
-                    "unit_price_cents": row["unit_price_cents"],
-                    "quantity": row["quantity"],
-                }
-            )
     return list(orders.values())
-
-
-def extract(cfg: DirectSourceSettings) -> list[dict]:
-    """Full extract every run - the source has no `updated_at`/cursor to filter
-    on (confirmed: no code path ever mutates a D1 order after insert). At this
-    order volume that's fine; correctness comes from the upsert layer below,
-    not from incremental extraction.
-    """
-    return _group_into_orders(_run_wrangler(cfg))
 
 
 # ---------------------------------------------------------------------------
@@ -187,9 +141,27 @@ raw_orders_direct = sa.table(
 )
 
 
+def _json_default(value: object) -> str:
+    """Defensive only - doesn't fire today, since orders.created_at/
+    delivery_date are TEXT columns in worker/schema.sql, so psycopg always
+    hands them back as plain str. Kept as cheap insurance against a future
+    schema change to TIMESTAMPTZ/DATE, which would otherwise raise
+    `TypeError: Object of type datetime is not JSON serializable` on the
+    first real run - round-trips through the same ISO-8601 string shape a
+    TEXT column already gives us, so nothing downstream would need to change.
+    """
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 def land_raw(conn: sa.Connection, orders: list[dict]) -> int:
     rows = [
-        {"external_id": o["id"], "payload": json.dumps(o), "updated_at": sa.func.now()}
+        {
+            "external_id": o["id"],
+            "payload": json.dumps(o, default=_json_default),
+            "updated_at": sa.func.now(),
+        }
         for o in orders
     ]
     result = upsert_returning(
@@ -342,16 +314,10 @@ def transform_and_load(conn: sa.Connection) -> tuple[int, int]:
 # ---------------------------------------------------------------------------
 
 
-def run(settings: Settings, source: DirectSourceSettings, *, dry_run: bool = False) -> RunResult:
+def run(settings: Settings, source: OrderingSourceSettings, *, dry_run: bool = False) -> RunResult:
     orders = extract(source)
 
     if dry_run:
-        print(f"resolved worker_dir={source.worker_dir} d1_target={source.d1_target}")
-        if source.d1_target == "local":
-            print(
-                "  note: --local will ingest EVERYTHING currently in local dev D1, "
-                "including any manual/Playwright test orders."
-            )
         print(f"{len(orders)} order(s) at the source:")
         for o in orders:
             skus = ", ".join(f"{i['sku']}x{i['quantity']}" for i in o["items"])
@@ -391,7 +357,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         settings = load_settings()
-        source_settings = load_direct_source_settings()
+        source_settings = load_ordering_source_settings()
     except ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return 2

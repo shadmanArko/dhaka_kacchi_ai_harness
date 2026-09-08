@@ -1,0 +1,12 @@
+.venv
+.git
+.idea
+.ruff_cache
+.env
+.env.*
+!.env.example
+__pycache__
+*.pyc
+work-plan
+*.png
+*.md

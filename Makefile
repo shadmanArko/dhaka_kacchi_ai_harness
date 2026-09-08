@@ -72,7 +72,7 @@ verify-idempotent: upgrade  ## prove every migration survives a replay over a li
 gate:  ## run the ARCHITECTURE.md section 9 exit-gate query
 	$(PY) -m warehouse.gate
 
-ingest-direct:  ## pull orders from the direct ordering backend (D1) into the warehouse
+ingest-direct:  ## pull orders from the ordering backend's own Postgres database into the warehouse
 	$(PY) -m warehouse.ingest.direct
 
 ingest-direct-dry-run:  ## show what ingest-direct would write, without writing

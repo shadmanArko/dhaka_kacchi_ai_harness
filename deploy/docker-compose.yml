@@ -1,0 +1,96 @@
+# VPS Docker Compose stack for Dhaka Kacchi's backend + database. One
+# Postgres instance with two databases (see postgres-init/01-init-databases.sh),
+# the ordering backend, the warehouse (never auto-started - see its
+# `profiles` below), and Caddy for automatic HTTPS.
+#
+# See CLAUDE.md in this directory for how to run and maintain this stack,
+# and ARCHITECTURE.md for why it's shaped this way.
+#
+# Assumes both repos are checked out as siblings on the VPS:
+#   /opt/dhaka-kacchi/dhaka_kacchi_ai_harness   (this repo - run `docker
+#                                                 compose` from here, in
+#                                                 deploy/)
+#   /opt/dhaka-kacchi/dhaka-kacchi-connect      (the ordering site + backend)
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?set in .env}
+      ORDERING_APP_PASSWORD: ${ORDERING_APP_PASSWORD:?set in .env}
+      WAREHOUSE_APP_PASSWORD: ${WAREHOUSE_APP_PASSWORD:?set in .env}
+      ORDERING_READER_PASSWORD: ${ORDERING_READER_PASSWORD:?set in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Only read on first init against an EMPTY data volume - the official
+      # postgres image never re-runs these against existing data. Re-running
+      # postgres-init/01-init-databases.sh by hand needs a fresh volume, or a
+      # manual `psql` session.
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    ports:
+      # Loopback only - never exposed publicly. Debug via an SSH tunnel:
+      #   ssh -L 5432:127.0.0.1:5432 <vps-user>@<vps-host>
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [dhaka-kacchi]
+
+  ordering-backend:
+    build:
+      context: ../../dhaka-kacchi-connect/worker
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://ordering_app:${ORDERING_APP_PASSWORD}@postgres:5432/ordering?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [dhaka-kacchi]
+
+  # Never started by `docker compose up` - `profiles: [cron]` means it's
+  # skipped entirely unless a profile is explicitly requested, which nothing
+  # here does. Always invoked directly, e.g.:
+  #   docker compose run --rm warehouse uv run alembic upgrade head
+  #   docker compose run --rm warehouse make ingest-direct
+  warehouse:
+    build:
+      context: ..
+    profiles: ["cron"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://warehouse_app:${WAREHOUSE_APP_PASSWORD}@postgres:5432/warehouse?sslmode=disable
+      ORDERING_DATABASE_URL: postgresql://ordering_reader:${ORDERING_READER_PASSWORD}@postgres:5432/ordering?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [dhaka-kacchi]
+
+  # The only service publishing 80/443 - obtains and renews Let's Encrypt
+  # certificates automatically, no certbot/cron to babysit.
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - ordering-backend
+    networks: [dhaka-kacchi]
+
+networks:
+  dhaka-kacchi:
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:

@@ -38,6 +38,38 @@ class Settings:
     echo_sql: bool
 
 
+def _validate_postgres_url(raw: str, *, var_name: str) -> URL:
+    """Shape rules shared by every Postgres connection string this project
+    uses (DATABASE_URL, ORDERING_DATABASE_URL): must be postgresql://, must
+    parse, must name a real (non-maintenance) database, and must set
+    sslmode when the host isn't local. One place for this means the two
+    connection strings can never silently drift apart on validation.
+    """
+    if raw.startswith("postgres://"):
+        raise ConfigError(f"{var_name} must use the 'postgresql://' scheme, not 'postgres://'.")
+
+    try:
+        url = make_url(raw)
+    except Exception as exc:
+        raise ConfigError(f"{var_name} is not a valid URL: {exc}") from None
+
+    if url.get_backend_name() != _BACKEND:
+        raise ConfigError(f"{var_name} must be a PostgreSQL URL; got driver {url.drivername!r}.")
+    if not url.database:
+        raise ConfigError(
+            f"{var_name} must name a database, e.g. postgresql://user@127.0.0.1:5432/dbname"
+        )
+    if url.database in _MAINTENANCE_DBS:
+        raise ConfigError(f"refusing to use maintenance database {url.database!r} for {var_name}.")
+    if url.host not in _LOCAL_HOSTS and url.query.get("sslmode") is None:
+        raise ConfigError(
+            f"{var_name} points at a non-local host but does not set sslmode. "
+            "Append ?sslmode=require (or ?sslmode=disable for container-to-container "
+            "traffic on the same Docker network - see the VPS infrastructure docs)."
+        )
+    return url
+
+
 def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
     """Read and validate configuration.
 
@@ -58,29 +90,7 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             f"{ENV_FILE} from .env.example."
         )
 
-    if raw.startswith("postgres://"):
-        raise ConfigError("DATABASE_URL must use the 'postgresql://' scheme, not 'postgres://'.")
-
-    try:
-        url = make_url(raw)
-    except Exception as exc:
-        raise ConfigError(f"DATABASE_URL is not a valid URL: {exc}") from None
-
-    if url.get_backend_name() != _BACKEND:
-        raise ConfigError(f"DATABASE_URL must be a PostgreSQL URL; got driver {url.drivername!r}.")
-    if not url.database:
-        raise ConfigError(
-            "DATABASE_URL must name a database, e.g. postgresql://user@127.0.0.1:5432/dhaka_kacchi"
-        )
-    if url.database in _MAINTENANCE_DBS:
-        raise ConfigError(
-            f"refusing to point the warehouse at maintenance database {url.database!r}."
-        )
-    if url.host not in _LOCAL_HOSTS and url.query.get("sslmode") is None:
-        raise ConfigError(
-            "DATABASE_URL points at a non-local host but does not set sslmode. "
-            "Append ?sslmode=require."
-        )
+    url = _validate_postgres_url(raw, var_name="DATABASE_URL")
 
     # A bare postgresql:// URL makes SQLAlchemy 2.0 reach for psycopg2, which is
     # not installed. Normalising here is what lets DATABASE_URL stay
@@ -96,26 +106,27 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
     )
 
 
-_D1_TARGETS = frozenset({"local", "remote"})
-
-
 @dataclass(frozen=True, slots=True)
-class DirectSourceSettings:
-    """Config for the direct-channel (D1) ingest job only.
+class OrderingSourceSettings:
+    """Config for reading the ordering backend's own Postgres database (the
+    'direct' ingestion channel - see warehouse/ingest/direct.py).
 
     Loaded separately from Settings, on purpose: Settings/load_settings() is
     called by bootstrap_db.py, verify.py, gate.py and migrations/env.py - none
-    of which have anything to do with the ordering backend. Forcing every one
-    of those to require a checked-out sibling repo just to run `make verify`
-    would be wrong.
+    of which have anything to do with the ordering backend, and shouldn't need
+    its connection string to run.
+
+    Holds only sqlalchemy_url - no admin_url, since this job only ever reads
+    the ordering database (as the read-only `ordering_reader` role), never
+    creates or drops it.
     """
 
-    worker_dir: Path  # dhaka-kacchi-connect/worker - the wrangler cwd
-    d1_database_name: str  # 'dhaka-kacchi', matches worker/wrangler.toml
-    d1_target: str  # 'local' | 'remote' - the entire prod switch
+    sqlalchemy_url: URL
 
 
-def load_direct_source_settings(environ: Mapping[str, str] | None = None) -> DirectSourceSettings:
+def load_ordering_source_settings(
+    environ: Mapping[str, str] | None = None,
+) -> OrderingSourceSettings:
     """Fail-fast config for warehouse/ingest/direct.py. Same idiom as
     load_settings(): validate eagerly, raise ConfigError with an actionable
     message, never return a partially-valid object.
@@ -124,31 +135,16 @@ def load_direct_source_settings(environ: Mapping[str, str] | None = None) -> Dir
         load_dotenv(ENV_FILE, override=False)
         environ = os.environ
 
-    raw_path = (environ.get("DHAKA_KACCHI_CONNECT_PATH") or "").strip()
-    connect_root = Path(raw_path) if raw_path else (REPO_ROOT.parent / "dhaka-kacchi-connect")
-    connect_root = connect_root.expanduser().resolve()
-    worker_dir = connect_root / "worker"
-    wrangler_toml = worker_dir / "wrangler.toml"
-
-    if not wrangler_toml.is_file():
+    raw = (environ.get("ORDERING_DATABASE_URL") or "").strip()
+    if not raw:
         raise ConfigError(
-            f"ordering-backend repo not found at {connect_root}.\n"
-            f"  Expected {wrangler_toml} to exist.\n"
-            "  Set DHAKA_KACCHI_CONNECT_PATH to the dhaka-kacchi-connect "
-            "checkout, or check it out as a sibling of this repo."
+            "ORDERING_DATABASE_URL is required and has no default.\n"
+            "  Set it in the process environment, or add it to "
+            f"{ENV_FILE} (see .env.example)."
         )
 
-    d1_target = (environ.get("DHAKA_KACCHI_D1_TARGET") or "local").strip().lower()
-    if d1_target not in _D1_TARGETS:
-        raise ConfigError(
-            f"DHAKA_KACCHI_D1_TARGET must be one of {sorted(_D1_TARGETS)}; got {d1_target!r}."
-        )
-
-    return DirectSourceSettings(
-        worker_dir=worker_dir,
-        d1_database_name=(environ.get("DHAKA_KACCHI_D1_DATABASE") or "dhaka-kacchi").strip(),
-        d1_target=d1_target,
-    )
+    url = _validate_postgres_url(raw, var_name="ORDERING_DATABASE_URL")
+    return OrderingSourceSettings(sqlalchemy_url=url.set(drivername=_DRIVER))
 
 
 def _main(argv: list[str]) -> int:
