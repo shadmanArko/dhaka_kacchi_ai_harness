@@ -72,6 +72,7 @@ Run these from `deploy/` on the VPS.
 | Run a warehouse command | `docker compose run --rm warehouse <command>`, e.g. `make gate` |
 | Apply a new warehouse migration | `docker compose run --rm warehouse uv run alembic upgrade head` |
 | Apply a new ordering-backend schema change | `docker compose run --rm ordering-backend npm run db:migrate` (see the DROP TABLE warning in that repo's `worker/CLAUDE.md` first) |
+| Register/re-register the Telegram inbound webhook (after setting `TELEGRAM_WEBHOOK_SECRET` in `.env`, or rotating it) | `docker compose run --rm ordering-backend npm run telegram:set-webhook` |
 | Tail Postgres | `docker compose exec postgres psql -U postgres` |
 | Restart everything | `docker compose restart` |
 
