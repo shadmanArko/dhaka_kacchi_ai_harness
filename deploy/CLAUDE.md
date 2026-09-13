@@ -31,7 +31,8 @@ This file is "how do I run it / change it."
    ```
 7. `cd dhaka_kacchi_ai_harness/deploy && cp .env.example .env && chmod 600 .env`
    — fill in every password (`openssl rand -base64 24` per line) and the
-   SMTP/Twilio values. Back up its contents to a password manager now.
+   SMTP/BerlinSMS/Telegram values. Back up its contents to a password
+   manager now.
 8. Start Postgres only, first, so the one-time init script can run against
    an empty volume:
    ```bash
