@@ -48,7 +48,7 @@ This file is "how do I run it / change it."
     docker compose up -d
     ```
     (`warehouse` stays down — see "The warehouse never runs as a service" below.)
-11. Confirm: `curl -i https://api.dhakakacchi.de/health` returns `200` with
+11. Confirm: `curl -i https://api.dhakakacchi.com/health` returns `200` with
     a valid certificate — proves Caddy obtained TLS and is proxying
     correctly.
 12. Install cron on the VPS host (not inside a container):
