@@ -51,14 +51,31 @@ This file is "how do I run it / change it."
 11. Confirm: `curl -i https://api.dhakakacchi.com/health` returns `200` with
     a valid certificate — proves Caddy obtained TLS and is proxying
     correctly.
-12. Install cron on the VPS host (not inside a container):
+12. Set up off-site backup sync (see `scripts/backup.sh`'s header comment):
+    create a free Backblaze B2 account, a private bucket, and an
+    Application Key scoped to just that bucket, then on the VPS host:
+    ```bash
+    curl https://rclone.org/install.sh | sudo bash
+    rclone config create backblaze-b2 b2 account=<keyID> key=<applicationKey>
     ```
-    0 3 * * * /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy/scripts/backup.sh >> /var/log/dhaka-kacchi-backup.log 2>&1
-    0 * * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-direct >> /var/log/dhaka-kacchi-ingest.log 2>&1
+13. Install cron on the VPS host (not inside a container). **Output must
+    go somewhere the (non-root) deploy user can actually write** —
+    `/var/log/` is root-owned; a cron job redirecting there fails silently,
+    and worse, the command itself never runs at all (bash refuses to start
+    it if the output redirect can't be opened) — this bit us once already,
+    see `git log` around the Sentry/Impressum work for the incident:
+    ```bash
+    mkdir -p /opt/dhaka-kacchi/logs
     ```
-13. Run `scripts/backup.sh` manually once and do one test restore before
-    trusting it — day one of a real incident shouldn't be the first time a
-    restore is attempted.
+    ```
+    0 3 * * * /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy/scripts/backup.sh >> /opt/dhaka-kacchi/logs/backup.log 2>&1
+    0 * * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-direct >> /opt/dhaka-kacchi/logs/ingest.log 2>&1
+    ```
+14. Run `scripts/backup.sh` manually once, confirm a new file lands in both
+    `/opt/dhaka-kacchi/backups/` AND the Backblaze bucket
+    (`rclone ls backblaze-b2:<bucket-name>`), and do one test restore
+    before trusting any of this — day one of a real incident shouldn't be
+    the first time a restore is attempted.
 
 ## Day-to-day commands
 

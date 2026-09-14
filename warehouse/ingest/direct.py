@@ -63,7 +63,7 @@ _ORDERS_SQL = sa.text(
     SELECT id, created_at, delivery_date, fulfillment_type, status,
            subtotal_cents, delivery_fee_cents, distance_km,
            address_postal_code, address_city, payment_method,
-           email_sent, whatsapp_sent
+           email_sent, telegram_sent
     FROM orders
     ORDER BY created_at, id
     """
