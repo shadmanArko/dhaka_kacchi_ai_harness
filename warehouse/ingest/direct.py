@@ -60,10 +60,10 @@ PLACEHOLDER_PACKAGING_COST_EUR = Decimal("0.50")
 # be re-derived without re-hitting the source."
 _ORDERS_SQL = sa.text(
     """
-    SELECT id, created_at, delivery_date, fulfillment_type, status,
+    SELECT id, created_at, updated_at, delivery_date, fulfillment_type, status,
            subtotal_cents, delivery_fee_cents, distance_km,
            address_postal_code, address_city, payment_method,
-           email_sent, telegram_sent
+           email_sent, telegram_sent, discount_cents
     FROM orders
     ORDER BY created_at, id
     """
@@ -186,6 +186,7 @@ orders_t = sa.table(
     sa.column("external_id"),
     sa.column("placed_at"),
     sa.column("promised_at"),
+    sa.column("delivered_at"),
     sa.column("gross"),
     sa.column("discounts"),
     sa.column("channel_fee"),
@@ -250,6 +251,27 @@ def transform_and_load(conn: sa.Connection) -> tuple[int, int]:
     for external_id, payload in raw_rows:
         placed_at = datetime.fromisoformat(payload["created_at"].replace("Z", "+00:00"))
         gross = Decimal(payload["subtotal_cents"]) / Decimal(100)
+        # discount_cents didn't exist at all until the admin panel added it
+        # (staff-applied discounts) - a raw payload landed before that
+        # migration won't have the key, so this defaults exactly like the
+        # source column itself does (DEFAULT 0).
+        discounts = Decimal(payload.get("discount_cents", 0)) / Decimal(100)
+
+        # PLACEHOLDER: the source has no dedicated "when did this actually
+        # get delivered" timestamp - only a generic updated_at that bumps on
+        # ANY change (a discount, email_sent, ...). Approximating with
+        # updated_at is a real accuracy tradeoff (a later, unrelated edit
+        # after delivery would shift this forward), but the warehouse's own
+        # ck_orders_delivered_consistency constraint (delivered_at required
+        # once status='delivered') would otherwise abort this order's
+        # upsert - and every other order in the same batch, since this
+        # whole loop runs in one transaction. Replace with a real delivery
+        # timestamp once the source ever tracks one.
+        delivered_at = (
+            datetime.fromisoformat(payload["updated_at"].replace("Z", "+00:00"))
+            if payload["status"] == "delivered"
+            else None
+        )
 
         (order_row,) = upsert_returning(
             conn,
@@ -260,8 +282,9 @@ def transform_and_load(conn: sa.Connection) -> tuple[int, int]:
                     "external_id": external_id,
                     "placed_at": placed_at,
                     "promised_at": _promised_at(payload["delivery_date"]),
+                    "delivered_at": delivered_at,
                     "gross": gross,
-                    "discounts": Decimal("0.00"),  # real fact: no discount concept in the source
+                    "discounts": discounts,
                     "channel_fee": Decimal("0.00"),  # real fact: direct channel has no commission
                     "packaging_cost": PLACEHOLDER_PACKAGING_COST_EUR,
                     "delivery_cost": Decimal("0.00"),  # real fact: source states free delivery
@@ -270,11 +293,15 @@ def transform_and_load(conn: sa.Connection) -> tuple[int, int]:
                 }
             ],
             conflict_on=["channel", "external_id"],
-            # Only status/updated_at converge on re-run - see direct.py's module
-            # docstring / the plan: a re-run must never silently restate a
-            # financial fact, but SHOULD pick up a real status transition once
-            # the source ever starts making them.
-            update=["status", "updated_at"],
+            # status/discounts/delivered_at/updated_at converge on re-run -
+            # a re-run must never silently restate an immutable financial
+            # fact (gross, channel_fee, packaging_cost, delivery_cost never
+            # change once set), but SHOULD pick up a real status
+            # transition, and a discount applied by staff *after* the
+            # order's first ingest (the whole point of that admin feature -
+            # see dhaka-kacchi-connect/worker/CLAUDE.md) needs the same
+            # treatment or it would silently never reach the warehouse.
+            update=["status", "discounts", "delivered_at", "updated_at"],
             returning=["id"],
         )
         orders_upserted += 1

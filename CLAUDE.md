@@ -37,11 +37,33 @@ counts, plus a hand-computed COGS spot check. See `warehouse/ingest/
 direct.py`'s module docstring and `warehouse/ingest/direct_verify.py` for the
 full design.
 
-There is still no `updated_at`/cursor-based incremental extraction — every
-run is a full refresh, correctness comes from the upsert layer, not from
-filtering what's read. Fine at current order volume; revisit if it ever
-isn't (the ordering backend's `orders.updated_at` column exists for exactly
-this, unused today).
+There is still no `updated_at`/cursor-based incremental *extraction* —
+every run is still a full refresh of every source row, correctness comes
+from the upsert layer, not from filtering what's read. Fine at current
+order volume; revisit if it ever isn't. `updated_at` itself is no longer
+fully unused, though: `direct.py` now reads it as a data field (not a
+filter) to approximate `delivered_at` — see the gotcha below.
+
+**Discounts and `delivered_at` (added with the ordering backend's admin
+panel — see `dhaka-kacchi-connect/worker/CLAUDE.md`'s own "Admin panel"
+section):** `orders.discount_cents` on the source flows into this
+warehouse's already-existing `orders.discounts` column (added back in
+migration `0006`, previously always hardcoded to zero) — `direct.py`'s
+`upsert_returning` call explicitly re-syncs `discounts` on every
+re-ingest, not just at first insert, specifically because a discount is
+often applied by staff *after* an order's first hourly ingest. If you ever
+touch that `update=[...]` allowlist, don't drop `discounts` from it — an
+easy-looking cleanup that would silently make every post-ingest discount
+invisible to the warehouse again. Separately, `status` becoming
+`'delivered'` requires a non-null `delivered_at`
+(`ck_orders_delivered_consistency`), which the source doesn't track
+precisely — `direct.py` approximates it with the source row's
+`updated_at` at the moment it's `'delivered'`. This is a real, named
+accuracy tradeoff (a later, unrelated edit after delivery would shift it
+forward), not a bug to silently "fix" by removing — without it, marking
+any real order `delivered` crashes that order's entire ingest transaction
+(and everything else batched with it), since `transform_and_load` runs
+the whole batch as one transaction.
 
 **A real bug this surfaced, worth remembering:** the `0012` seed originally let
 `recipe.active_from` default to `NOW()` at migration time. Point-in-time COGS
