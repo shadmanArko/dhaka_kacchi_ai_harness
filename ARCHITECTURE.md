@@ -487,6 +487,116 @@ agents should emit the same report shape so review is uniform across the fleet.
 
 ---
 
+### 4.7 Marketing attribution and event tracking
+
+Extends the Layer 0 warehouse (§5.4.1) rather than a separate system. Same Postgres instance,
+same `warehouse/` package, same ingestion pattern (`raw_*` first, idempotent job per source,
+upsert on a natural key). Fragmenting attribution into its own database would break identity
+resolution, which is already the hardest problem in the build.
+
+**Why now, not later.** Paid spend is starting to scale before an event vocabulary exists to
+measure it against. A closed, versioned taxonomy has to exist *before* the spend does, or the
+data it would have justified itself with never gets collected.
+
+#### Core entities
+
+```sql
+channel               id, slug, name, kind text CHECK (kind IN
+                       ('owned','paid_social','paid_search','marketplace',
+                        'organic_social','offline')), platform text
+                       -- marketing acquisition channel. NOT the same thing as
+                       -- orders.channel, which is fulfillment platform
+                       -- (Lieferando/Wolt/direct). See the note below.
+
+campaign               id, slug, channel_id FK, name, objective,
+                       budget_eur numeric(12,2), starts_at, ends_at,
+                       status text CHECK (...)
+
+campaign_variant       id, campaign_id FK, slug, creative_ref, audience,
+                       utm_content
+
+social_post            id, platform, external_id, campaign_variant_id FK NULL,
+                       posted_at timestamptz, permalink, content_type, caption
+                       -- UNIQUE (platform, external_id) is the re-ingest key,
+                       -- same shape as orders' UNIQUE (channel, external_id)
+
+social_metrics_snapshot
+                       id, social_post_id FK, captured_at timestamptz,
+                       impressions, reach, likes, comments, shares, saves, clicks
+                       -- APPEND-ONLY, never upsert-in-place. Same point-in-time
+                       -- philosophy as unit_cogs_at_time (§5.4.1) — a post's
+                       -- metrics move daily; overwriting the row loses the trend
+                       -- that is the entire point of tracking it.
+
+event_taxonomy         event_name text PK, category, description,
+                       required_properties jsonb, added_at, deprecated_at
+                       -- the closed, versioned vocabulary itself: page_view,
+                       -- menu_view, product_view, add_to_cart, begin_checkout,
+                       -- purchase, coupon_used, newsletter_signup, social_click,
+                       -- and whatever else gets formally added over time.
+                       -- text + CHECK-joinable, never a native enum — same
+                       -- reasoning as every other status/category column in
+                       -- this schema: values churn, an enum value can't be
+                       -- dropped. A taxonomy entry is deprecated_at, never
+                       -- deleted — matches the "corrections must be deliberate"
+                       -- philosophy already in the recipe/order_line design.
+
+event                  id, event_name FK -> event_taxonomy, occurred_at timestamptz,
+                       customer_id FK NULL, session_id, channel_id FK NULL,
+                       campaign_id FK NULL, campaign_variant_id FK NULL,
+                       order_id FK NULL, properties jsonb
+                       -- customer_id is NULL-able: most events happen before
+                       -- identity resolution has a customer to attach to.
+
+order_attribution      order_id FK, channel_id FK, campaign_id FK NULL, weight
+                       -- the junction between existing `orders` and the new
+                       -- backbone. A real order can trace to more than one
+                       -- touch (an Instagram post AND a promo code AND
+                       -- last-touch Google) — this is multi-touch, not 1:1,
+                       -- so it is never a column on `orders`. Lands raw and
+                       -- gets weighted separately, same "reconciliation, not
+                       -- trust" pattern as `payout_line`.
+
+promotion              id, slug, code UNIQUE, discount_type, discount_value,
+                       campaign_id FK NULL, valid_from, valid_to
+
+experiment             id, slug, hypothesis, campaign_id FK NULL,
+                       variant_a, variant_b, started_at, ended_at,
+                       primary_metric, result jsonb
+```
+
+**`orders.channel` is not marketing channel.** `orders.channel` (§5.4.1) already means fulfillment
+platform — Lieferando, Wolt, direct — and `UNIQUE (channel, external_id)` depends on that meaning
+staying fixed. Acquisition channel is a different concept and gets its own table plus the
+`order_attribution` junction. Do not overload the existing column; a query that assumes
+`orders.channel` answers "how did this customer find us" will be wrong in a way that is not
+obvious from the schema alone.
+
+**Manual/handwritten entries** (a collab with no API, an offline promo, a one-off campaign note)
+go through the same tables — `campaign`, `social_post`, `promotion` — via a `source = 'manual'`
+marker and a thin insert path off the CEO cockpit (§4), not a parallel spreadsheet-shaped schema
+living outside the warehouse.
+
+**Status.** Not yet built — this section documents the design before any migration exists, per
+the same discipline that put `payout_line`/`staff_shift`/`creator_collab` in "not built yet"
+(§5.4.1) rather than building them provisionally.
+
+#### Build sequence
+
+1. `event_taxonomy` + `event` — the foundation everything else attributes *to*. Design the
+   vocabulary before scaling paid spend against it, not after.
+2. `channel` + `campaign` + `campaign_variant` — the attribution backbone.
+3. `order_attribution` — connects existing `orders` to the backbone without touching
+   `orders.channel`.
+4. `social_post` + `social_metrics_snapshot`, one ingest job per platform. Instagram first — it is
+   already ranked in the §5.4.1 ingestion priority list, ahead of TikTok/Pinterest/LinkedIn/X,
+   which have no ingestion job yet and are added to the warehouse only once a real, live channel
+   exists for them.
+5. `promotion`, then `experiment` last — both are thin and derive most of their value from events
+   already flowing, so building them first would have nothing to read.
+
+---
+
 ## 6. Layer 1 — Derived assets
 
 | Asset | Depends on | Notes |
