@@ -39,6 +39,7 @@ EXPECTED_TABLES = frozenset(
         "raw_orders_direct",
         "event_taxonomy",
         "event",
+        "raw_events_direct",
     }
 )
 

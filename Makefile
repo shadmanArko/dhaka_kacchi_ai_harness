@@ -11,7 +11,8 @@ SEED_REV    := 0012
 
 .PHONY: help install env db upgrade schema seed reseed downgrade reset nuke \
         verify verify-idempotent gate ingest-direct ingest-direct-dry-run \
-        verify-ingest-direct current history sql psql revision lint fmt
+        verify-ingest-direct ingest-events ingest-events-dry-run \
+        verify-ingest-events current history sql psql revision lint fmt
 
 help:  ## show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -80,6 +81,15 @@ ingest-direct-dry-run:  ## show what ingest-direct would write, without writing
 
 verify-ingest-direct:  ## prove ingest-direct is idempotent and COGS-correct
 	$(PY) -m warehouse.ingest.direct_verify
+
+ingest-events:  ## pull marketing/behavioral events from the ordering backend's own Postgres database
+	$(PY) -m warehouse.ingest.events
+
+ingest-events-dry-run:  ## show what ingest-events would write, without writing
+	$(PY) -m warehouse.ingest.events --dry-run
+
+verify-ingest-events:  ## prove ingest-events is idempotent
+	$(PY) -m warehouse.ingest.events_verify
 
 current:  ## which revision is applied
 	$(ALEMBIC) current --verbose
