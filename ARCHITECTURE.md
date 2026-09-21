@@ -593,10 +593,13 @@ go through the same tables — `campaign`, `social_post`, `promotion` — via a 
 marker and a thin insert path off the CEO cockpit (§4), not a parallel spreadsheet-shaped schema
 living outside the warehouse.
 
-**Status.** Steps 1 and 2 of the build sequence below are built: `event_taxonomy`/`event`
-(migrations `0014`-`0016`) and `channel`/`campaign`/`campaign_variant` (`0017`-`0020`), all
-verified and exercised with real inserted/deleted test data. `order_attribution`, `social_post`,
-`social_metrics_snapshot`, `promotion`, and `experiment` are not yet built. See
+**Status.** Steps 1, 2, and the schema half of step 4 of the build sequence below are built:
+`event_taxonomy`/`event` (migrations `0014`-`0016`), `channel`/`campaign`/`campaign_variant`
+(`0017`-`0020`), and `social_post`/`social_metrics_snapshot` (`0021`-`0022`), all verified and
+exercised with real inserted/deleted test data. The Instagram ingest job that would populate
+`social_post` for real (`warehouse/ingest/instagram.py`) is written but unverified against a live
+account — no Meta Developer App exists yet, see that module's own docstring for setup steps.
+`order_attribution`, `promotion`, and `experiment` are not yet built. See
 `DATA_CONSTRAINTS.md` for the precise, current real/stand-in/designed-only breakdown.
 
 #### Build sequence

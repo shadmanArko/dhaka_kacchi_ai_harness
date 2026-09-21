@@ -43,6 +43,9 @@ EXPECTED_TABLES = frozenset(
         "channel",
         "campaign",
         "campaign_variant",
+        "social_post",
+        "social_metrics_snapshot",
+        "raw_social_posts_instagram",
     }
 )
 

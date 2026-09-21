@@ -147,6 +147,58 @@ def load_ordering_source_settings(
     return OrderingSourceSettings(sqlalchemy_url=url.set(drivername=_DRIVER))
 
 
+@dataclass(frozen=True, slots=True)
+class InstagramSourceSettings:
+    """Config for reading Instagram post data via the Meta Graph API (the
+    'instagram' ingestion channel - see warehouse/ingest/instagram.py and
+    ARCHITECTURE.md section 4.7).
+
+    Not a Postgres source, unlike OrderingSourceSettings - access_token and
+    business_account_id are Meta Graph API credentials, not a connection
+    string. As of this writing there is no real Meta Developer App / token
+    for this project yet (see that module's own docstring for setup steps);
+    this is structured the same fail-fast way so it's ready the moment real
+    credentials exist.
+    """
+
+    access_token: str
+    business_account_id: str
+
+
+def load_instagram_source_settings(
+    environ: Mapping[str, str] | None = None,
+) -> InstagramSourceSettings:
+    """Fail-fast config for warehouse/ingest/instagram.py. Same idiom as
+    load_ordering_source_settings(): validate eagerly, raise ConfigError
+    with an actionable message, never return a partially-valid object.
+    """
+    if environ is None:
+        load_dotenv(ENV_FILE, override=False)
+        environ = os.environ
+
+    access_token = (environ.get("INSTAGRAM_ACCESS_TOKEN") or "").strip()
+    if not access_token:
+        raise ConfigError(
+            "INSTAGRAM_ACCESS_TOKEN is required and has no default.\n"
+            "  Set it in the process environment, or add it to "
+            f"{ENV_FILE} (see .env.example). Requires a Meta Developer App "
+            "with Instagram Graph API access - see "
+            "warehouse/ingest/instagram.py's module docstring for setup steps."
+        )
+
+    business_account_id = (environ.get("INSTAGRAM_BUSINESS_ACCOUNT_ID") or "").strip()
+    if not business_account_id:
+        raise ConfigError(
+            "INSTAGRAM_BUSINESS_ACCOUNT_ID is required and has no default.\n"
+            "  Set it in the process environment, or add it to "
+            f"{ENV_FILE} (see .env.example)."
+        )
+
+    return InstagramSourceSettings(
+        access_token=access_token, business_account_id=business_account_id
+    )
+
+
 def _main(argv: list[str]) -> int:
     """`python -m warehouse.config [print-url]` - used by `make psql`."""
     try:

@@ -12,7 +12,8 @@ SEED_REV    := 0012
 .PHONY: help install env db upgrade schema seed reseed downgrade reset nuke \
         verify verify-idempotent gate ingest-direct ingest-direct-dry-run \
         verify-ingest-direct ingest-events ingest-events-dry-run \
-        verify-ingest-events current history sql psql revision lint fmt
+        verify-ingest-events ingest-instagram ingest-instagram-dry-run \
+        current history sql psql revision lint fmt
 
 help:  ## show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -90,6 +91,12 @@ ingest-events-dry-run:  ## show what ingest-events would write, without writing
 
 verify-ingest-events:  ## prove ingest-events is idempotent
 	$(PY) -m warehouse.ingest.events_verify
+
+ingest-instagram:  ## pull organic Instagram post data via the Meta Graph API (needs INSTAGRAM_ACCESS_TOKEN - see warehouse/ingest/instagram.py)
+	$(PY) -m warehouse.ingest.instagram
+
+ingest-instagram-dry-run:  ## show what ingest-instagram would write, without writing
+	$(PY) -m warehouse.ingest.instagram --dry-run
 
 current:  ## which revision is applied
 	$(ALEMBIC) current --verbose
