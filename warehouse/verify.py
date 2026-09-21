@@ -40,6 +40,9 @@ EXPECTED_TABLES = frozenset(
         "event_taxonomy",
         "event",
         "raw_events_direct",
+        "channel",
+        "campaign",
+        "campaign_variant",
     }
 )
 

@@ -593,9 +593,11 @@ go through the same tables — `campaign`, `social_post`, `promotion` — via a 
 marker and a thin insert path off the CEO cockpit (§4), not a parallel spreadsheet-shaped schema
 living outside the warehouse.
 
-**Status.** Not yet built — this section documents the design before any migration exists, per
-the same discipline that put `payout_line`/`staff_shift`/`creator_collab` in "not built yet"
-(§5.4.1) rather than building them provisionally.
+**Status.** Steps 1 and 2 of the build sequence below are built: `event_taxonomy`/`event`
+(migrations `0014`-`0016`) and `channel`/`campaign`/`campaign_variant` (`0017`-`0020`), all
+verified and exercised with real inserted/deleted test data. `order_attribution`, `social_post`,
+`social_metrics_snapshot`, `promotion`, and `experiment` are not yet built. See
+`DATA_CONSTRAINTS.md` for the precise, current real/stand-in/designed-only breakdown.
 
 #### Build sequence
 
