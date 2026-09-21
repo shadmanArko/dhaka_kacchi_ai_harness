@@ -70,7 +70,12 @@ This file is "how do I run it / change it."
     ```
     0 3 * * * /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy/scripts/backup.sh >> /opt/dhaka-kacchi/logs/backup.log 2>&1
     0 * * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-direct >> /opt/dhaka-kacchi/logs/ingest.log 2>&1
+    5 * * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-events >> /opt/dhaka-kacchi/logs/ingest-events.log 2>&1
     ```
+    The events job runs at :05, not :00 - offset from ingest-direct so the two
+    never run concurrently and interleave in a shared log. Separate log file
+    for the same reason (and so a grep for one job's output isn't polluted by
+    the other's).
 14. Run `scripts/backup.sh` manually once, confirm a new file lands in both
     `/opt/dhaka-kacchi/backups/` AND the Backblaze bucket
     (`rclone ls backblaze-b2:<bucket-name>`), and do one test restore
