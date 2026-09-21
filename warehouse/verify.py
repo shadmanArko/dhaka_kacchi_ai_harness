@@ -37,6 +37,8 @@ EXPECTED_TABLES = frozenset(
         "cockpit_alert",
         "agent_action",
         "raw_orders_direct",
+        "event_taxonomy",
+        "event",
     }
 )
 

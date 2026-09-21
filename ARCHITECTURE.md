@@ -528,25 +528,41 @@ social_metrics_snapshot
                        -- metrics move daily; overwriting the row loses the trend
                        -- that is the entire point of tracking it.
 
-event_taxonomy         event_name text PK, category, description,
-                       required_properties jsonb, added_at, deprecated_at
-                       -- the closed, versioned vocabulary itself: page_view,
-                       -- menu_view, product_view, add_to_cart, begin_checkout,
-                       -- purchase, coupon_used, newsletter_signup, social_click,
-                       -- and whatever else gets formally added over time.
-                       -- text + CHECK-joinable, never a native enum — same
-                       -- reasoning as every other status/category column in
-                       -- this schema: values churn, an enum value can't be
-                       -- dropped. A taxonomy entry is deprecated_at, never
-                       -- deleted — matches the "corrections must be deliberate"
-                       -- philosophy already in the recipe/order_line design.
+event_taxonomy         id UUID PK, event_name text UNIQUE NOT NULL, category,
+                       description, required_properties jsonb, added_at,
+                       deprecated_at
+                       -- id is the PK, event_name the natural key — same shape
+                       -- as menu_item.slug / ingredient.slug, not a bespoke
+                       -- text PK. warehouse/verify.py's check_uuid_primary_keys
+                       -- enforces a single uuid PK on every table, globally.
+                       -- The vocabulary itself: page_view, menu_view,
+                       -- product_view, add_to_cart, begin_checkout, purchase,
+                       -- coupon_used, newsletter_signup, social_click, and
+                       -- whatever else gets formally added over time.
+                       -- category/event_name: text + CHECK-joinable, never a
+                       -- native enum — same reasoning as every other
+                       -- status/category column in this schema: values churn,
+                       -- an enum value can't be dropped. A taxonomy entry is
+                       -- deprecated_at, never deleted — matches the
+                       -- "corrections must be deliberate" philosophy already
+                       -- in the recipe/order_line design.
 
-event                  id, event_name FK -> event_taxonomy, occurred_at timestamptz,
-                       customer_id FK NULL, session_id, channel_id FK NULL,
+event                  id, event_name FK -> event_taxonomy.event_name,
+                       occurred_at timestamptz, source text, anonymous_id,
+                       session_id, customer_id FK NULL, channel_id FK NULL,
                        campaign_id FK NULL, campaign_variant_id FK NULL,
                        order_id FK NULL, properties jsonb
                        -- customer_id is NULL-able: most events happen before
                        -- identity resolution has a customer to attach to.
+                       -- anonymous_id is a distinct concept from both
+                       -- session_id (one visit) and customer_id (resolved
+                       -- identity) — a persistent per-browser id that exists
+                       -- before either of those does. source records where the
+                       -- event was captured ('website', 'manual', ...) — event
+                       -- *capture* itself happens in the website/ordering
+                       -- backend repo (dhaka-kacchi-connect), not here, and
+                       -- flows into this warehouse the same read-only way
+                       -- orders/order_items already do.
 
 order_attribution      order_id FK, channel_id FK, campaign_id FK NULL, weight
                        -- the junction between existing `orders` and the new
@@ -594,6 +610,19 @@ the same discipline that put `payout_line`/`staff_shift`/`creator_collab` in "no
    exists for them.
 5. `promotion`, then `experiment` last — both are thin and derive most of their value from events
    already flowing, so building them first would have nothing to read.
+
+**API access lead time.** Meta Business verification, Instagram Graph API access, TikTok, and
+LinkedIn developer access all involve review processes lasting days to weeks, independent of build
+speed. Not relevant yet — no paid campaign exists on any platform today — but once one is actually
+being planned, start those applications on day one, in parallel with schema/ingest work, rather
+than waiting for the schema to be finished first.
+
+**Data-sufficiency gate, ahead of time.** CLV, churn, and causal/experiment models (Layer 1/2, far
+ahead of this section) should not train on real Dhaka Kacchi data until there is enough order and
+campaign history for a meaningful validation split. Validate the pipeline against a public
+stand-in dataset first — the same pattern already used for the review-intelligence project's Yelp
+stand-in — and swap in real data once volume supports it. See `DATA_CONSTRAINTS.md` for what is
+currently real, stand-in, or designed-only.
 
 ---
 
@@ -699,6 +728,12 @@ business legally, anything irreversible above the cap.
 | **5. Act tier** | Promote individual action types with reversal windows. | ongoing | 30 days, zero unreverted bad actions per action type |
 | **6. ML tier** | Demand forecast, churn, delivery time, price elasticity via the `ml-*` skill family. | month 12+ | ≥12 months clean history in the warehouse |
 
+**Portfolio-demo checkpoint.** Distinct from the phase gates above: this system is also a portfolio
+piece, so there is a separate, earlier checkpoint worth naming — one real agent running end to end
+against at least one live external data source, with the golden/eval set passing. Reachable well
+before Phase 6, and tracked independently of whether every phase gate above is met. See
+`DATA_CONSTRAINTS.md` for what is currently real vs. stand-in vs. designed-only.
+
 **Exception:** build `compliance` at read tier during phase 3 regardless of what the daily brief says.
 The cost of a gap there is not proportional to the time it saves.
 
@@ -748,6 +783,9 @@ advice.
 ---
 
 ## 11. Open decisions
+
+See `DATA_CONSTRAINTS.md` for the living real / stand-in / designed-only breakdown referenced
+throughout this document — check it before describing any component as "working."
 
 - [ ] Identity resolution strategy: deterministic hash match only, or probabilistic address matching
       with a review queue for ambiguous pairs?
