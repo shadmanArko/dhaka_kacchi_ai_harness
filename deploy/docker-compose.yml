@@ -56,7 +56,7 @@ services:
       # reportingRepository.ts and this repo's postgres-init/
       # 01-init-databases.sh for the role this connects as.
       WAREHOUSE_DATABASE_URL: postgresql://warehouse_reader:${WAREHOUSE_READER_PASSWORD}@postgres:5432/warehouse?sslmode=disable
-      # A THIRD, narrower cross-repo connection - UPDATE-only on
+      # A THIRD, narrower cross-repo connection - SELECT+UPDATE-only on
       # cockpit_alert, used only by the admin cockpit page's acknowledge/
       # resolve actions (worker/src/lib/cockpitRepository.ts). Deliberately
       # separate from WAREHOUSE_DATABASE_URL above rather than widening that

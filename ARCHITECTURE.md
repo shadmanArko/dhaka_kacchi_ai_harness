@@ -180,7 +180,8 @@ orders, a full week with no new orders, and a week-over-week organic-social enga
 platform — deliberately NOT the LLM agents section 3/7 describes yet (see that module's own
 docstring for why the `*-detector` agent-name suffix matters). You acknowledge/resolve from the
 cockpit page; those two actions write through a separate, narrowly-scoped `warehouse_cockpit_writer`
-role (UPDATE-only on `cockpit_alert`) rather than widening the reporting page's read-only
+role (`SELECT`+`UPDATE`-only on `cockpit_alert` — `UPDATE ... WHERE ...` needs `SELECT` on the
+filter columns too, learned the hard way on first deploy) rather than widening the reporting page's read-only
 `warehouse_reader` role.
 
 ---

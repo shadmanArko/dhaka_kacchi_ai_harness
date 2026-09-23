@@ -19,20 +19,26 @@
 #                              (worker/src/lib/reportingRepository.ts), so
 #                              that page can never write into the warehouse,
 #                              structurally.
-#   warehouse_cockpit_writer - UPDATE-only on `warehouse.cockpit_alert`, used
-#                              ONLY by dhaka-kacchi-connect's admin cockpit
-#                              page's acknowledge/resolve actions (worker/src/
-#                              lib/cockpitRepository.ts) - deliberately a
-#                              THIRD, narrower role rather than reusing
-#                              warehouse_reader for this, so a bug in the
-#                              cockpit UI still cannot write into anything
-#                              but this one table, and cannot INSERT/DELETE
-#                              even there (only ops/run_detectors.py, as
-#                              warehouse_app, ever creates a new alert row).
+#   warehouse_cockpit_writer - SELECT + UPDATE on `warehouse.cockpit_alert`
+#                              only, used ONLY by dhaka-kacchi-connect's
+#                              admin cockpit page's acknowledge/resolve
+#                              actions (worker/src/lib/cockpitRepository.ts)
+#                              - deliberately a THIRD, narrower role rather
+#                              than reusing warehouse_reader for this, so a
+#                              bug in the cockpit UI still cannot write into
+#                              anything but this one table, and cannot
+#                              INSERT/DELETE even there (only
+#                              ops/run_detectors.py, as warehouse_app, ever
+#                              creates a new alert row). SELECT is required
+#                              alongside UPDATE, not optional: an
+#                              `UPDATE ... WHERE ...` needs SELECT on the
+#                              WHERE-clause columns to evaluate the filter,
+#                              which UPDATE alone does not grant (learned the
+#                              hard way - see git log around 2026-09-23).
 #
-# This script CANNOT grant UPDATE ON cockpit_alert here - the table doesn't
-# exist yet at first-init time (this repo's own `alembic upgrade head`,
-# run as warehouse_app, creates it later). See deploy/CLAUDE.md's
+# This script CANNOT grant SELECT/UPDATE ON cockpit_alert here - the table
+# doesn't exist yet at first-init time (this repo's own `alembic upgrade
+# head`, run as warehouse_app, creates it later). See deploy/CLAUDE.md's
 # "First-time setup" step that runs right after the schema migration for
 # the one-off GRANT this role still needs.
 #
@@ -85,9 +91,10 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "warehouse" <<-EOSQ
         GRANT SELECT ON TABLES TO warehouse_reader;
 
     -- CONNECT/USAGE don't need cockpit_alert to exist, so these two are safe
-    -- here - the actual "GRANT UPDATE ON cockpit_alert" is deliberately NOT
-    -- here (see this file's header comment) and must be run once, by hand,
-    -- right after `alembic upgrade head` - see deploy/CLAUDE.md.
+    -- here - the actual "GRANT SELECT, UPDATE ON cockpit_alert" is
+    -- deliberately NOT here (see this file's header comment) and must be
+    -- run once, by hand, right after `alembic upgrade head` - see
+    -- deploy/CLAUDE.md.
     GRANT CONNECT ON DATABASE warehouse TO warehouse_cockpit_writer;
     GRANT USAGE ON SCHEMA public TO warehouse_cockpit_writer;
 EOSQL

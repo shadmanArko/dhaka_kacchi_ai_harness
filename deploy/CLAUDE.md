@@ -193,7 +193,7 @@ string` the first time this bit us). Hex is always URL-safe.
 
 Same reasoning as `warehouse_reader` above, added 2026-09-23 for the admin
 cockpit page's acknowledge/resolve actions (`worker/src/lib/
-cockpitRepository.ts`) — a narrower, UPDATE-only-on-`cockpit_alert` role,
+cockpitRepository.ts`) — a narrower role scoped to just `cockpit_alert`,
 deliberately separate from `warehouse_reader` (see postgres-init/01-init-
 databases.sh's header for why). Add it the same way:
 
@@ -204,9 +204,15 @@ docker compose exec -T postgres psql -U postgres -c "
 docker compose exec -T postgres psql -U postgres warehouse -c "
   GRANT CONNECT ON DATABASE warehouse TO warehouse_cockpit_writer;
   GRANT USAGE ON SCHEMA public TO warehouse_cockpit_writer;
-  GRANT UPDATE ON cockpit_alert TO warehouse_cockpit_writer;
+  GRANT SELECT, UPDATE ON cockpit_alert TO warehouse_cockpit_writer;
 "
 ```
+**`SELECT` is required alongside `UPDATE`, not optional** — an
+`UPDATE ... WHERE ...` needs `SELECT` on the WHERE-clause columns to
+evaluate the filter, which `UPDATE` alone does not grant. Granting only
+`UPDATE` (as this doc originally said) produces `permission denied for
+table cockpit_alert` the moment the acknowledge/resolve routes actually
+run a query, not at grant time — confirmed the hard way on first deploy.
 Then add `WAREHOUSE_COCKPIT_WRITER_PASSWORD` to `.env`, `docker compose up
 -d postgres`, and `docker compose up -d --build ordering-backend` to pick
 up `WAREHOUSE_COCKPIT_DATABASE_URL`. Same `openssl rand -hex 24` warning
