@@ -23,6 +23,7 @@ services:
       ORDERING_APP_PASSWORD: ${ORDERING_APP_PASSWORD:?set in .env}
       WAREHOUSE_APP_PASSWORD: ${WAREHOUSE_APP_PASSWORD:?set in .env}
       ORDERING_READER_PASSWORD: ${ORDERING_READER_PASSWORD:?set in .env}
+      WAREHOUSE_READER_PASSWORD: ${WAREHOUSE_READER_PASSWORD:?set in .env}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       # Only read on first init against an EMPTY data volume - the official
@@ -48,6 +49,12 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql://ordering_app:${ORDERING_APP_PASSWORD}@postgres:5432/ordering?sslmode=disable
+      # Read-only cross-repo connection into THIS repo's warehouse database,
+      # as warehouse_reader (never warehouse_app) - powers the admin
+      # reporting page only. See that repo's worker/src/lib/
+      # reportingRepository.ts and this repo's postgres-init/
+      # 01-init-databases.sh for the role this connects as.
+      WAREHOUSE_DATABASE_URL: postgresql://warehouse_reader:${WAREHOUSE_READER_PASSWORD}@postgres:5432/warehouse?sslmode=disable
     depends_on:
       postgres:
         condition: service_healthy

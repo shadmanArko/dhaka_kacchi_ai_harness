@@ -150,3 +150,29 @@ Every password lives in `deploy/.env` (`chmod 600`, gitignored). Never in
 code, never in `docker-compose.yml` itself. If `.env` is ever lost or
 leaked, rotate every password in it and update the file — nothing else
 needs to change.
+
+## Adding the `warehouse_reader` role to an existing production database
+
+`postgres-init/01-init-databases.sh` only runs once, automatically,
+against an *empty* data volume — it will never create `warehouse_reader`
+on a production database that already existed before this role was added
+(2026-09-23, for `dhaka-kacchi-connect`'s admin reporting page). Add it
+by hand, once, with:
+
+```bash
+docker compose exec -T postgres psql -U postgres -c "
+  CREATE ROLE warehouse_reader LOGIN PASSWORD '<same value as WAREHOUSE_READER_PASSWORD in .env>';
+"
+docker compose exec -T postgres psql -U postgres warehouse -c "
+  GRANT CONNECT ON DATABASE warehouse TO warehouse_reader;
+  GRANT USAGE ON SCHEMA public TO warehouse_reader;
+  GRANT SELECT ON ALL TABLES IN SCHEMA public TO warehouse_reader;
+  ALTER DEFAULT PRIVILEGES FOR ROLE warehouse_app IN SCHEMA public
+      GRANT SELECT ON TABLES TO warehouse_reader;
+"
+```
+Then add `WAREHOUSE_READER_PASSWORD` to `.env` (same value used above),
+`docker compose up -d` (recreates `postgres` with the new env var — no
+data loss, it only adds an env var to an already-running container's
+next start), and `docker compose up -d --build ordering-backend` to pick
+up `WAREHOUSE_DATABASE_URL`.

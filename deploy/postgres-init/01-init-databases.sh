@@ -5,7 +5,7 @@
 # this by hand later, either wipe the volume (destroys all data) or apply
 # the SQL below manually with psql.
 #
-# Creates two databases and three least-privilege roles:
+# Creates two databases and four least-privilege roles:
 #   ordering_app     - read-write, owns `ordering`   (used by the ordering
 #                                                       backend, dhaka-kacchi-connect/worker)
 #   warehouse_app    - read-write, owns `warehouse`  (used by this repo)
@@ -13,6 +13,11 @@
 #                       warehouse/ingest/direct.py - so that job can never
 #                       write into the live ordering database, structurally,
 #                       not just by convention.
+#   warehouse_reader - read-only on `warehouse`, the mirror image of
+#                       ordering_reader: used ONLY by dhaka-kacchi-connect's
+#                       admin reporting page (worker/src/lib/
+#                       reportingRepository.ts), so that page can never write
+#                       into the warehouse, structurally.
 #
 # Passwords come from environment variables set in deploy/.env - never
 # hardcoded here. See deploy/CLAUDE.md for the full list of required vars.
@@ -21,11 +26,13 @@ set -euo pipefail
 : "${ORDERING_APP_PASSWORD:?ORDERING_APP_PASSWORD must be set}"
 : "${WAREHOUSE_APP_PASSWORD:?WAREHOUSE_APP_PASSWORD must be set}"
 : "${ORDERING_READER_PASSWORD:?ORDERING_READER_PASSWORD must be set}"
+: "${WAREHOUSE_READER_PASSWORD:?WAREHOUSE_READER_PASSWORD must be set}"
 
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
     CREATE ROLE ordering_app LOGIN PASSWORD '$ORDERING_APP_PASSWORD';
     CREATE ROLE warehouse_app LOGIN PASSWORD '$WAREHOUSE_APP_PASSWORD';
     CREATE ROLE ordering_reader LOGIN PASSWORD '$ORDERING_READER_PASSWORD';
+    CREATE ROLE warehouse_reader LOGIN PASSWORD '$WAREHOUSE_READER_PASSWORD';
 
     CREATE DATABASE ordering OWNER ordering_app;
     CREATE DATABASE warehouse OWNER warehouse_app;
@@ -44,4 +51,17 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "ordering" <<-EOSQL
     GRANT SELECT ON ALL TABLES IN SCHEMA public TO ordering_reader;
     ALTER DEFAULT PRIVILEGES FOR ROLE ordering_app IN SCHEMA public
         GRANT SELECT ON TABLES TO ordering_reader;
+EOSQL
+
+# Same reasoning as ordering_reader above, mirrored for `warehouse`: this
+# only runs on a brand-new volume, where `warehouse` doesn't have any tables
+# yet either (this repo's own `alembic upgrade head`, run as warehouse_app,
+# creates them later) - the default-privileges grant makes warehouse_reader's
+# SELECT apply to every table warehouse_app creates from now on.
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "warehouse" <<-EOSQL
+    GRANT CONNECT ON DATABASE warehouse TO warehouse_reader;
+    GRANT USAGE ON SCHEMA public TO warehouse_reader;
+    GRANT SELECT ON ALL TABLES IN SCHEMA public TO warehouse_reader;
+    ALTER DEFAULT PRIVILEGES FOR ROLE warehouse_app IN SCHEMA public
+        GRANT SELECT ON TABLES TO warehouse_reader;
 EOSQL
