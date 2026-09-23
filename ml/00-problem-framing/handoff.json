@@ -1,0 +1,182 @@
+{
+  "schema_version": "1.4.0",
+  "stage": "00-problem-framing",
+  "status": "partial",
+  "produced_by": {
+    "skill": "ml-problem-framing",
+    "skill_version": "1.0.0",
+    "timestamp": "2026-09-23T00:00:00Z",
+    "operator": "shadman.arko@gmail.com"
+  },
+  "bootstrap": {
+    "mode": "greenfield",
+    "confidence": "full",
+    "notes": "No ml/ or docs/ directory existed before this stage. First stage of a new pipeline on the existing dhaka_kacchi_ai_harness warehouse."
+  },
+  "decisions": [
+    {
+      "id": "task-type-classification-not-regression",
+      "decision": "task_type = binary_classification (above/below platform-relative typical engagement), not regression on raw likes/comments/shares/reach.",
+      "rationale": "With ~140 posts per platform and metrics on incompatible scales across platforms (Threads views vs Facebook impressions vs Instagram reach), a precise regression invites false precision on too little data. A relative tier is robust and still decision-useful.",
+      "alternatives_considered": ["regression on raw engagement count", "multiclass low/medium/high tier"],
+      "reversible": true
+    },
+    {
+      "id": "label-rolling-median-not-global",
+      "decision": "Label = 1 if a post's likes+comments+shares exceeds the EXPANDING median of that same platform's posts up to that point in time; else 0.",
+      "rationale": "Using the whole-dataset (including future) median to define 'typical' would leak backward — a post published in month 1 would be judged against posts published in month 6. An expanding, platform-specific median avoids that while staying simple.",
+      "reversible": true
+    },
+    {
+      "id": "threads-excluded-from-primary-label",
+      "decision": "Threads posts are excluded from the primary binary label and initial model scope; Facebook (and Instagram, pending re-ingest) are the primary platforms.",
+      "rationale": "Live query against the local warehouse (2026-09-23) showed 56 of 57 real Threads posts have likes+comments+shares = 0 (Facebook: 161/228 posts have nonzero engagement). A platform-median split on Threads would put ~98% of posts in one class, which is a degenerate label, not a usable one. Threads' one real engagement signal is `views`, a fundamentally different metric than the like/comment/share signal the other platforms share — folding it into the same label without adjustment would be a modeling error I can name in advance rather than discover after training.",
+      "alternatives_considered": [
+        "include Threads with the same label definition (rejected: near-zero variance, discovered via live query)",
+        "define a Threads-specific label on `views` instead (deferred: revisit once Instagram data closes the more urgent gap; Threads is also only 57 posts)"
+      ],
+      "reversible": true
+    },
+    {
+      "id": "no-video-pixel-features-yet",
+      "decision": "Initial feature set is pre-publish tabular/text only: platform, content_type, caption text, day-of-week, hour. No raw video/image pixel features in this pass.",
+      "rationale": "User asked whether transfer learning fits and whether raw video should be an input. With ~350-480 total posts, fine-tuning any vision/video model from scratch is data-starved. The realistic use of transfer learning here is a frozen pretrained embedding (caption text embedding, or a pretrained image encoder on a thumbnail) added as a FEATURE later, not full retraining — deferred to 01-data/03-modeling once the tabular baseline exists and can show whether such a feature is even worth the added complexity.",
+      "reversible": true
+    },
+    {
+      "id": "floor-set-modest",
+      "decision": "Floor = balanced accuracy >= 0.60 on the primary metric, set before any model has been run.",
+      "rationale": "Genuinely uncertain whether ~350-480 rows of caption/content_type/timing data carries enough signal to clear even a modest bar over the 0.50 dummy. Set low enough to be achievable if there's any real signal, high enough that a model matching the dummy still fails it.",
+      "reversible": false
+    }
+  ],
+  "assertions": [
+    {
+      "id": "class-balance-checked-facebook",
+      "claim": "Facebook engagement (likes+comments+shares) has enough variance for a non-degenerate median split.",
+      "method": "Live SQL query against local warehouse: count of posts with engagement > 0 vs = 0, per platform, plus avg/median/min/max engagement per platform.",
+      "result": "pass",
+      "evidence": "facebook: n=228, avg=3.19, median=2.0, range 0-45, 161/228 posts nonzero. threads: n=57, avg=0.018, median=0.0, range 0-1, only 1/57 posts nonzero."
+    },
+    {
+      "id": "class-balance-checked-threads",
+      "claim": "Threads engagement supports the same label definition as Facebook.",
+      "method": "Same live SQL query as above, evaluated specifically for the threads platform.",
+      "result": "fail",
+      "evidence": "56 of 57 Threads posts have likes+comments+shares = 0; a median split would yield a ~2% positive rate. Threads excluded from the primary label as a result (see decision threads-excluded-from-primary-label)."
+    },
+    {
+      "id": "floor-set-before-results",
+      "claim": "The floor (balanced accuracy >= 0.60) was set before any model was trained.",
+      "method": "No model code exists yet in this repo; ml/ directory created for the first time in this stage.",
+      "result": "pass"
+    },
+    {
+      "id": "dummy-not-degenerate",
+      "claim": "The dummy baseline (coin-flip / most-frequent-class) is not degenerate on the primary metric.",
+      "method": "Label is constructed to be ~50/50 by definition (median split), so most-frequent-class and coin-flip dummies coincide and balanced accuracy for either is ~0.50, not a flattering 0/1 extreme.",
+      "result": "pass"
+    },
+    {
+      "id": "prediction-time-testable",
+      "claim": "Prediction time (immediately before publishing, after caption/media/timing are decided) is specific enough to audit a candidate feature against.",
+      "method": "Manual review of the feature list against warehouse schema: platform, content_type, caption text, day-of-week, hour are all knowable pre-publish; likes/comments/shares/reach/impressions/views are all post-hoc and explicitly excluded as features.",
+      "result": "pass"
+    },
+    {
+      "id": "instagram-data-access-gap",
+      "claim": "Instagram posts (132, per DATA_CONSTRAINTS.md's real production ingest) are available in the local warehouse used for this ML work.",
+      "method": "Live SQL query: `select platform, count(*) from social_post group by platform` against local DATABASE_URL. Initially failed (0 instagram rows), so `warehouse.ingest.instagram` was re-run locally in this same session and the query repeated.",
+      "result": "pass",
+      "evidence": "Re-ingest landed 132 raw rows / upserted 132 posts / 132 snapshots, exit code 0, matching production's documented 132 exactly. Local corpus is now facebook=228, instagram=132, threads=57 (417 total, threads excluded from the primary label per decision threads-excluded-from-primary-label)."
+    }
+  ],
+  "risks": [
+    {
+      "id": "small-n",
+      "description": "Total corpus is ~350 (Facebook + Threads, local) to ~480 (once Instagram is re-ingested locally) posts, and the primary-platform corpus for this label (Facebook + Instagram) is smaller still. Statistical power for detecting a real effect is limited.",
+      "severity": "high",
+      "mitigation": "Stopping condition explicitly allows and expects a negative finding rather than indefinite tuning; floor set modestly (0.60) for the same reason."
+    },
+    {
+      "id": "threads-label-incompatibility",
+      "description": "Threads' real engagement (likes/comments/shares) is near-zero across nearly every post; its only substantive metric is `views`, which is not comparable to the like/comment/share signal used for Facebook/Instagram.",
+      "severity": "medium",
+      "mitigation": "Threads excluded from the primary model in this pass. Revisit with a Threads-specific label on `views` only if/when Threads' post volume grows enough to be worth a separate model."
+    },
+    {
+      "id": "instagram-not-yet-in-local-corpus",
+      "description": "At the start of this stage, Instagram had zero rows in the local warehouse despite being real, ingested data in production.",
+      "severity": "low",
+      "mitigation": "Resolved within this stage: re-ran `warehouse.ingest.instagram` locally, landed all 132 posts, confirmed via live query. No longer an open gap, kept here for the record."
+    },
+    {
+      "id": "caption-text-feature-untested",
+      "description": "Caption text as a raw feature (vs. simple derived stats like length/hashtag count) may need real NLP preprocessing (embeddings, TF-IDF) that hasn't been scoped yet.",
+      "severity": "low",
+      "mitigation": "01-data/03-modeling to decide feature representation once EDA on captions is done; starting with simple derived stats (length, hashtag count, emoji count) is the safe default."
+    }
+  ],
+  "outputs": [
+    {
+      "name": "Problem framing report",
+      "path": "ml/00-problem-framing/report.md",
+      "type": "document",
+      "description": "Human-readable version of this handoff."
+    },
+    {
+      "name": "Problem framing doc",
+      "path": "docs/00-problem-framing.md",
+      "type": "document",
+      "description": "Copy for the repo's own docs, committed alongside the code."
+    }
+  ],
+  "next_stage_needs": [
+    "Confirm Instagram row count in local warehouse before EDA (target: 132 rows, matching production per DATA_CONSTRAINTS.md).",
+    "Run the modality screen: this is tabular + short text (caption), not image/video pixels in this pass — expect route=classical_first unless EDA finds otherwise.",
+    "Compute the expanding per-platform median label defined here on the real Facebook + Instagram corpus and report the resulting class balance before splitting."
+  ],
+  "problem_spec": {
+    "decision": "Before publishing a drafted organic social post (Instagram/Facebook), flag whether it is likely to underperform that platform's own typical engagement, so the operator can revise caption/media/timing or post anyway knowing the odds.",
+    "actor": "Dhaka Kacchi's sole operator, reviewing a drafted post before hitting publish.",
+    "task_type": "binary_classification",
+    "protected_attributes": [],
+    "target_definition": "1 if a post's (likes + comments + shares) exceeds the expanding median of that same platform's posts up to and including that post's posted_at timestamp; 0 otherwise. Computed only for Facebook and Instagram in this pass (see decision threads-excluded-from-primary-label). Uses only past posts to define 'typical' at each point in time, never future ones.",
+    "prediction_time": "Immediately before publishing, after caption text, media type (video/image/carousel), and the planned posting day/hour are decided, but before the post goes live and before any engagement exists.",
+    "label_latency": "Engagement accumulates over hours to a few days after publishing; for this offline/advisory use case label latency does not block iteration since labels are computed retrospectively from historical data, not needed in real time.",
+    "cost_ratio": {
+      "false_positive": "Operator revises a post that would have actually done fine — a few minutes of unnecessary rework.",
+      "false_negative": "Operator posts as-is and it underperforms — one missed opportunity to improve a single post, no other consequence.",
+      "ratio_estimate": "roughly 1:1",
+      "basis": "This is an advisory-only, non-automated flag with no financial or safety consequence on either side; both error types cost a small amount of the operator's attention, not treated as asymmetric since neither is a guess dressed as a measurement."
+    },
+    "primary_metric": "balanced_accuracy",
+    "floor": {
+      "metric": "balanced_accuracy",
+      "value": 0.6,
+      "rationale": "Modest bar chosen because it is genuinely uncertain whether pre-publish tabular/caption features carry enough signal on ~250-350 primary-platform posts to beat a coin flip by much. Set low enough to be clearable if real signal exists, high enough that matching the dummy still fails it.",
+      "set_before_results": true
+    },
+    "secondary_metrics": ["precision", "recall", "roc_auc"],
+    "baselines": [
+      {
+        "name": "coin-flip dummy",
+        "kind": "dummy",
+        "definition": "Uniform random 0/1 prediction, ignoring all features. Non-degenerate here because the label is constructed to be ~50/50 by definition."
+      },
+      {
+        "name": "logistic regression on platform + content_type only",
+        "kind": "untuned_model",
+        "definition": "Plain, untuned logistic regression using only the two cheapest categorical features, no caption/timing features, no hyperparameter tuning."
+      }
+    ],
+    "stopping_condition": "If a tuned baseline-through-gradient-boosted-trees pass does not beat the coin-flip dummy by at least 5 percentage points of balanced accuracy, report a negative finding: the dataset is too small/noisy for this task in its current form, and revisit once real post volume roughly doubles per primary platform, rather than continuing to tune indefinitely.",
+    "constraints": {
+      "latency_budget": "not latency-sensitive; a single prediction can take seconds",
+      "inference_mode": "batch",
+      "explainability_required": true,
+      "cost_ceiling": "no dedicated infra budget; must run on the existing VPS alongside the warehouse"
+    },
+    "risk_tier": "minimal"
+  }
+}
