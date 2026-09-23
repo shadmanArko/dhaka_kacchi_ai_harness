@@ -13,6 +13,7 @@ SEED_REV    := 0012
         verify verify-idempotent gate ingest-direct ingest-direct-dry-run \
         verify-ingest-direct ingest-events ingest-events-dry-run \
         verify-ingest-events ingest-instagram ingest-instagram-dry-run \
+        ingest-facebook ingest-facebook-dry-run \
         current history sql psql revision lint fmt
 
 help:  ## show this help
@@ -97,6 +98,12 @@ ingest-instagram:  ## pull organic Instagram post data via the Meta Graph API (n
 
 ingest-instagram-dry-run:  ## show what ingest-instagram would write, without writing
 	$(PY) -m warehouse.ingest.instagram --dry-run
+
+ingest-facebook:  ## pull Facebook Page posts via the Meta Graph API (needs FACEBOOK_PAGE_ACCESS_TOKEN - see warehouse/ingest/facebook.py)
+	$(PY) -m warehouse.ingest.facebook
+
+ingest-facebook-dry-run:  ## show what ingest-facebook would write, without writing
+	$(PY) -m warehouse.ingest.facebook --dry-run
 
 current:  ## which revision is applied
 	$(ALEMBIC) current --verbose

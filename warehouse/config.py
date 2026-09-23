@@ -155,10 +155,7 @@ class InstagramSourceSettings:
 
     Not a Postgres source, unlike OrderingSourceSettings - access_token and
     business_account_id are Meta Graph API credentials, not a connection
-    string. As of this writing there is no real Meta Developer App / token
-    for this project yet (see that module's own docstring for setup steps);
-    this is structured the same fail-fast way so it's ready the moment real
-    credentials exist.
+    string.
     """
 
     access_token: str
@@ -197,6 +194,55 @@ def load_instagram_source_settings(
     return InstagramSourceSettings(
         access_token=access_token, business_account_id=business_account_id
     )
+
+
+@dataclass(frozen=True, slots=True)
+class FacebookSourceSettings:
+    """Config for reading Facebook Page post data via the Meta Graph API
+    (the 'facebook' ingestion channel - see warehouse/ingest/facebook.py and
+    ARCHITECTURE.md section 4.7).
+
+    Deliberately a separate token from InstagramSourceSettings, even though
+    both are Page-scoped tokens that may in practice be the same value: this
+    is a Page Access Token (for Facebook Page posts/insights), not the
+    Instagram Business Account token, and keeping them decoupled means either
+    can be scoped narrower later without the other's config changing.
+    """
+
+    access_token: str
+    page_id: str
+
+
+def load_facebook_source_settings(
+    environ: Mapping[str, str] | None = None,
+) -> FacebookSourceSettings:
+    """Fail-fast config for warehouse/ingest/facebook.py. Same idiom as
+    load_instagram_source_settings().
+    """
+    if environ is None:
+        load_dotenv(ENV_FILE, override=False)
+        environ = os.environ
+
+    access_token = (environ.get("FACEBOOK_PAGE_ACCESS_TOKEN") or "").strip()
+    if not access_token:
+        raise ConfigError(
+            "FACEBOOK_PAGE_ACCESS_TOKEN is required and has no default.\n"
+            "  Set it in the process environment, or add it to "
+            f"{ENV_FILE} (see .env.example). Requires a Page Access Token "
+            "with pages_read_engagement, pages_read_user_content, and "
+            "read_insights - see warehouse/ingest/facebook.py's module "
+            "docstring for setup steps."
+        )
+
+    page_id = (environ.get("FACEBOOK_PAGE_ID") or "").strip()
+    if not page_id:
+        raise ConfigError(
+            "FACEBOOK_PAGE_ID is required and has no default.\n"
+            "  Set it in the process environment, or add it to "
+            f"{ENV_FILE} (see .env.example)."
+        )
+
+    return FacebookSourceSettings(access_token=access_token, page_id=page_id)
 
 
 def _main(argv: list[str]) -> int:

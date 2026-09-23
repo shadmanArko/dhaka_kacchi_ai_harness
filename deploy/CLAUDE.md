@@ -71,11 +71,24 @@ This file is "how do I run it / change it."
     0 3 * * * /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy/scripts/backup.sh >> /opt/dhaka-kacchi/logs/backup.log 2>&1
     0 * * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-direct >> /opt/dhaka-kacchi/logs/ingest.log 2>&1
     5 * * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-events >> /opt/dhaka-kacchi/logs/ingest-events.log 2>&1
+    30 4 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-instagram >> /opt/dhaka-kacchi/logs/ingest-instagram.log 2>&1
+    45 4 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-facebook >> /opt/dhaka-kacchi/logs/ingest-facebook.log 2>&1
     ```
     The events job runs at :05, not :00 - offset from ingest-direct so the two
     never run concurrently and interleave in a shared log. Separate log file
     for the same reason (and so a grep for one job's output isn't polluted by
     the other's).
+
+    Instagram/Facebook are **daily, not hourly** - deliberately, not an
+    oversight: Meta's own Page Insights docs state most metrics only update
+    once every 24 hours, so an hourly cron would just make 24x the API
+    calls for no new data. Scheduled at 4:30/4:45am (after the 3am backup,
+    well clear of the hourly :00/:05 jobs), 15 minutes apart from each
+    other - both jobs are genuinely slow (one insights API call per post,
+    observed anywhere from ~2 to ~40+ minutes for ~130-230 posts depending
+    on Meta's response latency that day), so running them back-to-back
+    rather than concurrently avoids two long-running jobs contending for
+    the same app's Graph API quota at once.
 14. Run `scripts/backup.sh` manually once, confirm a new file lands in both
     `/opt/dhaka-kacchi/backups/` AND the Backblaze bucket
     (`rclone ls backblaze-b2:<bucket-name>`), and do one test restore

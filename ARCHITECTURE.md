@@ -593,12 +593,13 @@ go through the same tables — `campaign`, `social_post`, `promotion` — via a 
 marker and a thin insert path off the CEO cockpit (§4), not a parallel spreadsheet-shaped schema
 living outside the warehouse.
 
-**Status.** Steps 1, 2, and the schema half of step 4 of the build sequence below are built:
-`event_taxonomy`/`event` (migrations `0014`-`0016`), `channel`/`campaign`/`campaign_variant`
-(`0017`-`0020`), and `social_post`/`social_metrics_snapshot` (`0021`-`0022`), all verified and
-exercised with real inserted/deleted test data. The Instagram ingest job that would populate
-`social_post` for real (`warehouse/ingest/instagram.py`) is written but unverified against a live
-account — no Meta Developer App exists yet, see that module's own docstring for setup steps.
+**Status.** Steps 1, 2, and 4 of the build sequence below are built: `event_taxonomy`/`event`
+(migrations `0014`-`0016`), `channel`/`campaign`/`campaign_variant` (`0017`-`0020`), and
+`social_post`/`social_metrics_snapshot` (`0021`-`0023`). Organic ingestion from both Instagram
+and Facebook (`warehouse/ingest/instagram.py`, `warehouse/ingest/facebook.py`) is real and
+verified against the live Dhaka Kacchi accounts — see `DATA_CONSTRAINTS.md` for exactly what's
+confirmed vs. still gapped (notably: Facebook `reach`/`impressions` unfetched, no working metric
+found yet). Threads (also step 4's `platform` scope) is not yet built.
 `order_attribution`, `promotion`, and `experiment` are not yet built. See
 `DATA_CONSTRAINTS.md` for the precise, current real/stand-in/designed-only breakdown.
 

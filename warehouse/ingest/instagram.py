@@ -2,15 +2,22 @@
 Graph API. See ARCHITECTURE.md section 4.7.
 
 ======================================================================
-STATUS AS OF WRITING: UNVERIFIED AGAINST A REAL ACCOUNT. There is no Meta
-Developer App / access token for this project yet. Every Graph API path,
-field name, and insights metric name below is best-effort from training
-knowledge, not confirmed against a live response. VERIFY against Meta's
-current docs before the first real run:
-  https://developers.facebook.com/docs/instagram-platform/instagram-graph-api
-Expect to adjust INSIGHTS_METRICS and _map_content_type() once real data
-comes back - metric availability differs by media type and has changed
-across Graph API versions before.
+VERIFIED against the real Dhaka Kacchi Instagram Business Account via Graph
+API Explorer (2026-09-22, API version v26.0):
+  - GET /{business_account_id}/media with MEDIA_FIELDS below returns real
+    posts correctly, including pagination via paging.next.
+  - GET /{media_id}/insights: `impressions` is REJECTED for every media
+    type tested (REELS and FEED) - Meta deprecated it entirely as of Graph
+    API v22.0 ("the impressions metric is no longer supported"). Do not
+    re-add it. `reach,likes,comments,shares,saved` all confirmed working,
+    identically, for both REELS and FEED/IMAGE posts.
+  - `media_product_type` values seen in practice: "REELS" and "FEED" -
+    confirms _map_content_type()'s REELS->"reel" and (FEED, media_type=
+    IMAGE)->"image" branches. "STORY" and CAROUSEL_ALBUM are still
+    unverified (no such post existed to test against).
+Not yet verified: a real scheduled/automated run (only tested via manual
+Graph API Explorer calls so far), and the long-lived Page Access Token flow
+- see step 4 below.
 ======================================================================
 
 SETUP (do this before the first real run):
@@ -18,18 +25,21 @@ SETUP (do this before the first real run):
      (Business type).
   2. The Instagram account must be a Professional (Business/Creator)
      account, linked to a Facebook Page.
-  3. Add the Instagram Graph API product to the app, request
-     instagram_basic + instagram_manage_insights permissions.
-  4. Generate a long-lived access token for that Page/Instagram Business
-     Account (short-lived user tokens expire in ~1 hour - not usable for a
-     scheduled job).
-  5. A small/new business app may need Meta's App Review before these
-     permissions work outside the small list of "Instagram testers" added
-     in the app dashboard - this can take days to weeks (see
-     ARCHITECTURE.md section 4.7's "API access lead time" note). While
-     pending, the app's own registered testers CAN use it immediately.
-  6. Set INSTAGRAM_ACCESS_TOKEN and INSTAGRAM_BUSINESS_ACCOUNT_ID (the
-     Instagram Business Account id, not the username) - see .env.example.
+  3. Add the Instagram Graph API product to the app. Exactly four
+     permissions are needed - no more: instagram_basic,
+     instagram_manage_insights, pages_show_list, pages_read_engagement.
+     Each is usable immediately by the app's own developers/testers at
+     "Ready for testing" status; Meta App Review is only required to use
+     them against *other* businesses' accounts, not your own.
+  4. Generate a long-lived access token for that Page (a Page Access Token
+     derived from a long-lived User Access Token does not expire) - a
+     short-lived token from Graph API Explorer's default "Generate Access
+     Token" button expires in ~1-2 hours and is not usable for a scheduled
+     job.
+  5. Set INSTAGRAM_ACCESS_TOKEN and INSTAGRAM_BUSINESS_ACCOUNT_ID (the
+     Instagram Business Account id, NOT the Facebook Page id and NOT the
+     @username - find it via GET /me?fields=id,name,instagram_business_account
+     using a Page-scoped token) - see .env.example.
 
 Same "land raw, then transform" shape as direct.py/events.py:
 raw_social_posts_instagram first, social_post + social_metrics_snapshot
@@ -58,17 +68,20 @@ from warehouse.config import (
 )
 from warehouse.ingest.upsert import upsert_returning
 
-# PLACEHOLDER: bump when Meta deprecates this version - see
-# https://developers.facebook.com/docs/graph-api/changelog
-GRAPH_API_VERSION = "v21.0"
+# Confirmed working 2026-09-22 (see module docstring). Bump when Meta
+# deprecates this version - https://developers.facebook.com/docs/graph-api/changelog
+GRAPH_API_VERSION = "v26.0"
 GRAPH_API_BASE = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
 
+# Verified against real posts - see module docstring.
 MEDIA_FIELDS = "id,caption,media_type,media_product_type,permalink,timestamp"
 
-# UNVERIFIED - see module docstring. "saved" (not "saves") is Meta's own
-# metric name; the mismatch with our saves column is intentional and
-# handled in transform_and_load, not a typo.
-INSIGHTS_METRICS = "impressions,reach,likes,comments,shares,saved"
+# Verified against real REELS and FEED posts - see module docstring.
+# `impressions` deliberately absent: Meta rejects it outright as of v22.0
+# ("no longer supported"), confirmed for both media types tested. "saved"
+# (not "saves") is Meta's own metric name; the mismatch with our `saves`
+# column is intentional and handled in transform_and_load, not a typo.
+INSIGHTS_METRICS = "reach,likes,comments,shares,saved"
 
 REQUEST_TIMEOUT_S = 30
 
@@ -207,10 +220,12 @@ social_metrics_snapshot_t = sa.table(
 
 
 def _map_content_type(payload: dict) -> str | None:
-    """UNVERIFIED against a live account - see module docstring. Best-effort
-    mapping from Meta's media_type/media_product_type to this warehouse's
-    closed social_post.content_type vocabulary (image/video/carousel/reel/
-    story)."""
+    """Maps Meta's media_type/media_product_type to this warehouse's closed
+    social_post.content_type vocabulary (image/video/carousel/reel/story).
+    REELS->"reel" and (FEED, media_type=IMAGE)->"image" verified against
+    real posts 2026-09-22 (see module docstring). CAROUSEL_ALBUM and STORY
+    branches are still unverified - no such post existed on the account to
+    test against."""
     product_type = payload.get("media_product_type")
     media_type = payload.get("media_type")
     if product_type == "REELS":

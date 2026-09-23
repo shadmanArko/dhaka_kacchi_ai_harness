@@ -46,6 +46,8 @@ EXPECTED_TABLES = frozenset(
         "social_post",
         "social_metrics_snapshot",
         "raw_social_posts_instagram",
+        "raw_social_posts_facebook",
+        "raw_social_posts_threads",
     }
 )
 
