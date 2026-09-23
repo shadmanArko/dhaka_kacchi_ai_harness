@@ -1,0 +1,172 @@
+{
+  "schema_version": "1.4.0",
+  "stage": "01-data",
+  "status": "partial",
+  "produced_by": {
+    "skill": "ml-data",
+    "skill_version": "1.0.0",
+    "timestamp": "2026-09-23T00:00:00Z",
+    "operator": "shadman.arko@gmail.com"
+  },
+  "bootstrap": {
+    "mode": "handoff",
+    "confidence": "full",
+    "notes": "Read ml/00-problem-framing/handoff.json directly (same session, same repo)."
+  },
+  "inputs_consumed": [
+    {
+      "stage": "00-problem-framing",
+      "path": "ml/00-problem-framing/handoff.json",
+      "sha256": "3e26c61510273746f7bea78354168420277de32697fb23e58e82f5d32d313615",
+      "schema_version": "1.4.0"
+    }
+  ],
+  "decisions": [
+    {
+      "id": "spine-is-facebook-instagram-social-post",
+      "decision": "Spine = social_post rows where platform in ('facebook', 'instagram'), one row per post, grain confirmed at 360 rows (228 facebook + 132 instagram) before any join.",
+      "rationale": "Matches 00-problem-framing's scope decision to exclude Threads from the primary label. Grain is the natural one for this problem: one prediction per post.",
+      "reversible": false
+    },
+    {
+      "id": "join-latest-snapshot-not-assume-single",
+      "decision": "Joined social_post to social_metrics_snapshot on social_post_id, taking it as one row per post rather than assuming a single snapshot exists structurally.",
+      "rationale": "The schema's own UNIQUE constraint is (social_post_id, captured_at), not social_post_id alone — meaning multiple snapshots per post over time are structurally allowed even though the current data happens to have exactly one per post. Checked empirically rather than trusting a same-named column pattern; today there is no fan-out, but a future re-ingest with periodic re-snapshots would need this query changed to pick the latest captured_at.",
+      "reversible": true
+    },
+    {
+      "id": "recode-null-content-type",
+      "decision": "Facebook's 10 posts with content_type = NULL will be recoded to a literal 'unknown' category at feature-prep time, not dropped and not imputed to an existing class.",
+      "rationale": "This is a deterministic recode of a raw categorical (upstream data-entry gap, not a value to be learned), so it belongs here per the 01/03 split rule, not in the model pipeline as a learned imputation.",
+      "reversible": true
+    },
+    {
+      "id": "derive-is-video-cross-platform",
+      "decision": "Add a derived boolean feature `is_video` (true when content_type in {'video','reel'}) alongside the raw per-platform content_type, to be computed in stage 03's feature step.",
+      "rationale": "The two primary platforms use different vocabulary for the same medium: Facebook posts are labeled 'video', Instagram's equivalent is labeled 'reel' (Instagram's content_type CHECK constraint doesn't even include 'video' as an allowed value). Feeding raw content_type alone would force the model to re-learn that 'video'≈'reel' from ~360 rows; a deterministic derived flag encodes the known fact directly.",
+      "reversible": true
+    },
+    {
+      "id": "no-imputation-this-stage",
+      "decision": "No imputation performed in this stage. content_type nulls are recoded to a named category (a deterministic label, not a guessed value); no other column has missing values requiring imputation.",
+      "rationale": "Per the kernel rule: imputation parameters are learned from data and belong in the stage 03 pipeline, fit on training folds only.",
+      "reversible": true
+    }
+  ],
+  "assertions": [
+    {
+      "id": "spine-row-count-independent",
+      "claim": "Spine row count (facebook + instagram social_post rows) was counted independently before any join.",
+      "method": "SELECT platform, count(*) FROM social_post WHERE platform IN ('facebook','instagram') GROUP BY 1",
+      "result": "pass",
+      "evidence": "facebook=228, instagram=132, total=360"
+    },
+    {
+      "id": "join-keys-verified-against-ddl",
+      "claim": "The join key between social_post and social_metrics_snapshot was verified against the actual FK/constraint catalog, not assumed from column naming.",
+      "method": "Queried pg_constraint directly for both tables.",
+      "result": "pass",
+      "evidence": "fk_social_metrics_snapshot_social_post_id: FOREIGN KEY (social_post_id) REFERENCES social_post(id) ON DELETE CASCADE. uq_social_metrics_snapshot_post_captured_at: UNIQUE (social_post_id, captured_at) -- composite, not social_post_id alone."
+    },
+    {
+      "id": "duplicate-check-empirical",
+      "claim": "Checked empirically (not just via the declared constraint) whether any post currently has more than one metrics snapshot.",
+      "method": "SELECT social_post_id, count(*) FROM social_metrics_snapshot GROUP BY 1 HAVING count(*) > 1",
+      "result": "pass",
+      "evidence": "Zero posts with more than one snapshot today (0 rows returned), despite the schema structurally allowing it. Recorded as decision join-latest-snapshot-not-assume-single since this could change."
+    },
+    {
+      "id": "orphan-and-null-rate-on-join-key",
+      "claim": "No orphaned social_post rows (posts with zero snapshots) among the two primary platforms, and the join preserved the spine's row count.",
+      "method": "Anti-join count (posts with no matching snapshot) plus a direct INNER JOIN row count compared against the independently-counted spine.",
+      "result": "pass",
+      "evidence": "0 posts with zero snapshots (checked across all platforms, not just the two primary ones). Joined count = 360, exactly matching the spine count of 360 -- no fan-out, no silent row loss."
+    },
+    {
+      "id": "features-checked-against-prediction-time",
+      "claim": "Every candidate feature (platform, content_type, caption, posted_at-derived day-of-week/hour) exists at prediction_time (immediately before publishing); no post-hoc metric was included as a feature.",
+      "method": "Manual review of the candidate feature list against problem_spec.prediction_time and the table schema. impressions/reach/likes/comments/shares/saves/clicks all live only in social_metrics_snapshot, which is populated after a post goes live -- confirmed excluded from features, used only to construct the label.",
+      "result": "pass"
+    },
+    {
+      "id": "target-class-balance-measured",
+      "claim": "The expanding per-platform median label (defined in 00-problem-framing) was actually computed on the real Facebook+Instagram data, and its class balance measured, before any split design.",
+      "method": "SQL window-function computation of the expanding median per platform (posts ordered by posted_at), applied to compute the binary label, then counted per platform and combined.",
+      "result": "pass",
+      "evidence": "facebook: 97/228 positive (42.5%); instagram: 70/132 positive (53.0%); combined: 167/360 positive (46.4%). Non-degenerate -- confirms the 00-problem-framing scoping decision (excluding Threads) produced a usable label on the platforms that remain."
+    },
+    {
+      "id": "sentinel-and-impossible-values-searched",
+      "claim": "Searched explicitly for sentinel codes and impossible values (not just relying on NOT NULL/CHECK constraints already enforced by the schema).",
+      "method": "Reviewed the CHECK constraints (ck_social_metrics_snapshot_nonneg enforces all engagement metrics >= 0 at the database level) and manually inspected caption length distribution and content_type value sets for anything that looked like a disguised sentinel (e.g. a suspicious repeated exact value).",
+      "result": "pass",
+      "evidence": "No sentinel codes found. content_type NULL (10 Facebook rows) is genuine missingness, not a disguised sentinel -- handled via decision recode-null-content-type. No impossible values (all engagement/impression/reach counts are schema-enforced non-negative; posted_at values fall within a real 2026-04-26 to 2026-09-22 range, no future timestamps)."
+    }
+  ],
+  "risks": [
+    {
+      "id": "small-n-per-platform",
+      "description": "228 (Facebook) and 132 (Instagram) posts respectively -- enough for a first classical baseline but not for a per-platform model; the initial model will need to pool both platforms with `platform` as a feature rather than training two separate models.",
+      "severity": "high",
+      "mitigation": "Already reflected in problem_spec's stopping condition; 03-modeling should try a pooled model first and treat separate per-platform models as a stretch goal, not the default."
+    },
+    {
+      "id": "content-type-cross-platform-vocabulary-mismatch",
+      "description": "Facebook and Instagram use different content_type vocabularies for the same underlying medium (video vs. reel), and Instagram's CHECK constraint doesn't even permit 'video' as a value.",
+      "severity": "medium",
+      "mitigation": "Addressed via decision derive-is-video-cross-platform; raw content_type is kept as a feature too since 'reel' vs 'carousel' vs 'image' still carries platform-specific signal beyond just video/not-video."
+    },
+    {
+      "id": "caption-representation-undecided",
+      "description": "Caption text (21-1446 chars on Facebook, 23-993 on Instagram) is a real free-text field with no decided feature representation yet -- raw text, derived stats (length/hashtag/emoji count), or a pretrained embedding per 00-problem-framing's transfer-learning decision.",
+      "severity": "medium",
+      "mitigation": "Left to 03-modeling: start with cheap derived stats as the safe baseline feature set, evaluate whether a frozen pretrained embedding earns its added complexity only after that baseline exists."
+    },
+    {
+      "id": "campaign-variant-id-entirely-null",
+      "description": "social_post.campaign_variant_id is NULL for all 360 rows in the primary-platform spine.",
+      "severity": "low",
+      "mitigation": "Expected -- this column links to paid-campaign attribution, and no paid campaign exists yet per DATA_CONSTRAINTS.md. Excluded from the feature set entirely rather than treated as a missing-value problem."
+    },
+    {
+      "id": "snapshot-cardinality-could-change",
+      "description": "Today every post has exactly one metrics snapshot, but the schema's UNIQUE constraint permits multiple snapshots per post over time (e.g. if re-ingestion starts capturing periodic snapshots rather than one-shot).",
+      "severity": "low",
+      "mitigation": "The extract query in ml/01-data/extract.py currently does a plain INNER JOIN, which is only correct because there is no fan-out today. If periodic snapshots are ever introduced, this query must be changed to select the latest captured_at per post before re-running any downstream stage."
+    }
+  ],
+  "outputs": [
+    {
+      "name": "Cached dataset extract",
+      "path": "ml/01-data/artifacts/dataset.csv",
+      "type": "dataset",
+      "description": "360 rows (facebook+instagram social_post joined to its metrics snapshot), with the expanding per-platform median engagement and the resulting binary label already computed. Reproducible via ml/01-data/extract.py against the live warehouse."
+    },
+    {
+      "name": "Extraction script",
+      "path": "ml/01-data/extract.py",
+      "type": "code",
+      "description": "Deterministic SQL extract + label computation. No learned parameters. Re-run anytime to regenerate the CSV."
+    },
+    {
+      "name": "Stage 01 report",
+      "path": "ml/01-data/report.md",
+      "type": "document"
+    }
+  ],
+  "next_stage_needs": [
+    "02-split: dataset.csv has 360 rows spanning 2026-04-26 to 2026-09-22 with posted_at as the natural time column -- consider whether a temporal split (train on earlier posts, test on later ones) better matches how this model would actually be used (predicting a not-yet-posted post) than a random split, even though problem_spec doesn't mandate one.",
+    "03-modeling: content_type has 10 NULLs on Facebook (recode to 'unknown' per decision recode-null-content-type) and a cross-platform vocabulary mismatch (see modality_screen and risks) -- derive is_video before one-hot encoding raw content_type.",
+    "03-modeling: caption representation is not yet decided -- start with derived stats (length, hashtag count) as the cheap baseline feature; a pretrained embedding feature is a later addition per 00-problem-framing's transfer-learning decision, not a default."
+  ],
+  "modality_screen": {
+    "input_type": "multimodal",
+    "n_rows": 360,
+    "n_features": 4,
+    "unstructured_present": true,
+    "unstructured_columns": ["caption"],
+    "pretrained_models_available": true,
+    "route": "classical_first",
+    "rationale": "Predominantly tabular (platform, content_type, posted_at-derived day/hour) plus one free-text field (caption). Listed honestly as multimodal rather than pretending it's purely tabular, per the kernel's own warning against that specific failure mode. Route is still classical_first, not deep_learning_likely, for a stated reason: with only 360 rows, training any text/vision model from scratch is data-starved, and the caption field's realistic treatment -- per 00-problem-framing's transfer-learning decision -- is a FROZEN pretrained embedding used as an input feature to a classical model, not end-to-end deep learning. pretrained_models_available=true reflects that a pretrained sentence-embedding model exists and could supply that feature later; it does not mean this project trains a deep model. The deep-learning gate in 03-modeling has final say regardless of this route."
+  }
+}

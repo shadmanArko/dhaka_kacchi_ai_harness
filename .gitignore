@@ -5,3 +5,6 @@ __pycache__/
 .ruff_cache/
 .pytest_cache/
 .DS_Store
+
+# ML pipeline: cached data extracts (regenerable from the live warehouse, may contain real captions)
+ml/*/artifacts/*.csv
