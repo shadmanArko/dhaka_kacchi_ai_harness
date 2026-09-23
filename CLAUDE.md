@@ -162,7 +162,18 @@ is illustrative mockup text in a sample JSON payload.
 - **Never set `sqlalchemy.url` in `alembic.ini`** — ConfigParser `%`-interpolates
   values, so a password containing `%` breaks. The engine is built in `env.py`.
 - **`transaction_per_migration=True`** — without it the entire chain is one
-  transaction, so a failure at 0009 rolls back 0001–0008 and records nothing.
+  transaction, so a failure at 0009 rolls back 0001–0008 and records nothing. The
+  flip side bit us once (2026-09-23): `make verify-idempotent`'s "full down/up round
+  trip" ran `alembic downgrade base` against a dev DB that had accumulated real
+  ingest test data (Threads posts). `0024`'s `downgrade()` narrows `social_post`'s
+  platform CHECK back to `('instagram','facebook')` — correctly refused by Postgres
+  once real `'threads'` rows exist — but by then `0027`'s downgrade (deleting its
+  seeded `channel`/`campaign`/`campaign_variant` rows) and two `DROP TABLE`s had
+  already committed, in their own transactions, before the failure. `make upgrade`
+  recovers cleanly (every migration is `IF NOT EXISTS`/upsert-idempotent), but the
+  lesson stands: **`verify-idempotent` is not safe to run against a dev database
+  you also use for manual live-source testing** — either accept it only tells you
+  about a *clean* schema's idempotency, or `make reset` first.
 
 ## Not built yet (deliberately)
 

@@ -602,6 +602,12 @@ is real and verified against the live Dhaka Kacchi accounts — see `DATA_CONSTR
 exactly what's confirmed vs. still gapped (notably: Facebook `reach`/`impressions` unfetched,
 no working metric found yet; Threads `impressions` sourced from Meta's own "in development"
 `views` metric, and `reach`/`saves`/`clicks` have no Threads equivalent at all).
+`channel`/`campaign`/`campaign_variant` now hold real rows too (migration `0027`): one
+channel + one open-ended "ongoing" campaign + one catch-all `bio_link` variant per organic
+platform. `event.channel_id`/`campaign_id`/`campaign_variant_id` resolve against them at
+ingest time (`warehouse/ingest/events.py`) from `utm_source`/`utm_content` captured on the
+website by `dhaka-kacchi-connect`'s `src/lib/utmCapture.ts` — first-touch-per-session, silent
+`NULL` on no/unmapped UTM (not an error; see that module's and `events.py`'s docstrings).
 `order_attribution`, `promotion`, and `experiment` are not yet built. See
 `DATA_CONSTRAINTS.md` for the precise, current real/stand-in/designed-only breakdown.
 

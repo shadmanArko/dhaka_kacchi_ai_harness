@@ -21,6 +21,25 @@ either. The source ids are preserved verbatim under
 properties.source_customer_id / properties.source_order_id instead of being
 silently dropped, so a future identity-resolution job has something to join
 against.
+
+ATTRIBUTION RESOLUTION: event.channel_id/campaign_id/campaign_variant_id ARE
+populated by this job, from properties.utm_source/utm_content - the write
+side is dhaka-kacchi-connect's src/lib/utmCapture.ts, which stamps those
+onto every event in a session that landed via a link carrying those params
+(see that module's docstring for the first-touch-per-session model). The
+join is against channel.platform + campaign_variant.utm_content (see
+warehouse/migrations/versions/0027_channel_campaign_seed.py for the seeded
+rows this resolves against today - one catch-all "bio_link" variant per
+organic platform).
+
+UNMAPPED UTMS ARE SILENT, NOT AN ERROR - deliberately unlike event_name
+(FK RESTRICT, hard failure on an unknown value): utm_source/utm_content are
+free text a marketer typed into a bio link or ad platform, not a fixed
+vocabulary this codebase controls, so a typo or a not-yet-seeded campaign
+must not take down the whole ingest run. An event with no matching
+channel/campaign/variant simply keeps those three columns NULL - the same
+"unattributed" state as an event with no UTM params at all (e.g. direct
+traffic).
 """
 
 from __future__ import annotations
@@ -132,9 +151,52 @@ event_t = sa.table(
     sa.column("session_id"),
     sa.column("customer_id"),
     sa.column("order_id"),
+    sa.column("channel_id"),
+    sa.column("campaign_id"),
+    sa.column("campaign_variant_id"),
     sa.column("external_id"),
     sa.column("properties"),
 )
+
+_ATTRIBUTION_SQL = sa.text(
+    """
+    SELECT channel.id AS channel_id, campaign.id AS campaign_id,
+           campaign_variant.id AS campaign_variant_id
+    FROM campaign_variant
+    JOIN campaign ON campaign.id = campaign_variant.campaign_id
+    JOIN channel ON channel.id = campaign.channel_id
+    WHERE channel.platform = :utm_source AND campaign_variant.utm_content = :utm_content
+    LIMIT 1
+    """
+)
+
+_NO_MATCH = (None, None, None)
+
+
+def _resolve_attribution(
+    conn: sa.Connection,
+    cache: dict[tuple[str, str], tuple[object, object, object]],
+    utm_source: str | None,
+    utm_content: str | None,
+) -> tuple[object, object, object]:
+    """Resolves (channel_id, campaign_id, campaign_variant_id) from a
+    website visit's captured utm_source/utm_content - see the module
+    docstring's ATTRIBUTION RESOLUTION note. An unmapped or missing UTM pair
+    resolves to (None, None, None), not an error - see UNMAPPED UTMS ARE
+    SILENT. Cached per (utm_source, utm_content) for the run: a handful of
+    campaigns account for nearly every row at current volume, so this avoids
+    one lookup query per event."""
+    if not utm_source or not utm_content:
+        return _NO_MATCH
+    key = (utm_source, utm_content)
+    if key not in cache:
+        row = conn.execute(
+            _ATTRIBUTION_SQL, {"utm_source": utm_source, "utm_content": utm_content}
+        ).first()
+        cache[key] = (
+            (row.channel_id, row.campaign_id, row.campaign_variant_id) if row else _NO_MATCH
+        )
+    return cache[key]
 
 
 def transform_and_load(conn: sa.Connection) -> int:
@@ -142,6 +204,7 @@ def transform_and_load(conn: sa.Connection) -> int:
 
     events_upserted = 0
     rows = []
+    attribution_cache: dict[tuple[str, str], tuple[object, object, object]] = {}
     for external_id, payload in raw_rows:
         properties = dict(payload.get("properties") or {})
         # Preserve the source's own customer/order ids rather than silently
@@ -150,6 +213,13 @@ def transform_and_load(conn: sa.Connection) -> int:
             properties["source_customer_id"] = payload["customer_id"]
         if payload.get("order_id"):
             properties["source_order_id"] = payload["order_id"]
+
+        channel_id, campaign_id, campaign_variant_id = _resolve_attribution(
+            conn,
+            attribution_cache,
+            properties.get("utm_source"),
+            properties.get("utm_content"),
+        )
 
         rows.append(
             {
@@ -160,6 +230,9 @@ def transform_and_load(conn: sa.Connection) -> int:
                 "session_id": payload.get("session_id"),
                 "customer_id": None,
                 "order_id": None,
+                "channel_id": channel_id,
+                "campaign_id": campaign_id,
+                "campaign_variant_id": campaign_variant_id,
                 "external_id": external_id,
                 "properties": json.dumps(properties),
             }
