@@ -1,0 +1,175 @@
+{
+  "schema_version": "1.4.0",
+  "stage": "02-split",
+  "status": "complete",
+  "produced_by": {
+    "skill": "ml-split",
+    "skill_version": "1.0.0",
+    "timestamp": "2026-09-23T00:00:00Z",
+    "operator": "shadman.arko@gmail.com"
+  },
+  "bootstrap": {
+    "mode": "handoff",
+    "confidence": "full",
+    "notes": "Read ml/00-problem-framing/handoff.json and ml/01-data/handoff.json directly (same session, same repo)."
+  },
+  "inputs_consumed": [
+    {
+      "stage": "00-problem-framing",
+      "path": "ml/00-problem-framing/handoff.json",
+      "sha256": "3e26c61510273746f7bea78354168420277de32697fb23e58e82f5d32d313615",
+      "schema_version": "1.4.0"
+    },
+    {
+      "stage": "01-data",
+      "path": "ml/01-data/handoff.json",
+      "sha256": "3b1852117402c7f078b83e7f94cd8283b536e188325249d67344bbcc3dcb1c94",
+      "schema_version": "1.4.0"
+    }
+  ],
+  "decisions": [
+    {
+      "id": "temporal-split-not-random",
+      "decision": "Split by time (train on earlier posts, test on later posts), not a random or stratified-random split.",
+      "rationale": "The real deployment scenario is predicting a not-yet-published post -- always in the future relative to whatever the model was trained on. A random split would let the model see posts from September while being evaluated on posts from May, which is not the task it will ever actually be asked to perform. This was 01-data's own open question, resolved here per the kernel's governing principle: the split must simulate how the model will actually be used.",
+      "alternatives_considered": [
+        "stratified random split by platform+label (rejected: would inflate the offline metric relative to real deployment performance, since the model would train on posts chronologically after some of its own test posts)",
+        "per-platform separate cutoffs (rejected: empirically unnecessary -- facebook's and instagram's 80th-percentile posted_at dates landed within one day of each other, so a single global cutoff serves both platforms fairly)"
+      ],
+      "reversible": false
+    },
+    {
+      "id": "cutoff-2026-08-22",
+      "decision": "Cutoff = 2026-08-22 00:00:00+02:00. Train = 289 posts (2026-04-26 to 2026-08-21), test = 71 posts (2026-08-22 to 2026-09-22).",
+      "rationale": "Chosen as the ~80th percentile of posted_at within each platform independently, then confirmed both platforms agreed closely (within a day), so one global date works cleanly. Gives a test period long enough (~1 month) to be a realistic deployment window, not a single day.",
+      "reversible": false
+    },
+    {
+      "id": "no-gap-between-train-and-test",
+      "decision": "No temporal gap inserted between the train and test windows.",
+      "rationale": "problem_spec.label_latency notes engagement accumulates over hours to a few days, but this is an offline/retrospective dataset (all labels are already fully materialized from historical data), not a live streaming setup where a gap would be needed to avoid training on labels that weren't actually available yet at training time. Verified explicitly: max train posted_at (2026-08-21 18:32) is before min test posted_at (2026-08-22 10:27), zero overlap.",
+      "reversible": true
+    },
+    {
+      "id": "expanding-window-cv-for-tuning",
+      "decision": "Within the 289-row training set, stage 03 should use expanding-window (time-series-aware) cross-validation for hyperparameter tuning, e.g. 5 folds, rather than a single train/validation split.",
+      "rationale": "n=289 is small enough that a single held-out validation slice would give an unstable estimate; k-fold-style tuning is worth the extra compute per the kernel's own guidance on small/medium data. Folds must still respect time order (no shuffling) to stay faithful to deployment.",
+      "reversible": true
+    },
+    {
+      "id": "no-explicit-group-key",
+      "decision": "No entity-grouping constraint applied beyond the post id itself.",
+      "rationale": "Grain is one row per post (confirmed in 01-data); no customer, account, or other repeated entity spans multiple rows the way a user or patient id would in other problems. Checked empirically: all 360 post ids are unique.",
+      "reversible": true
+    }
+  ],
+  "assertions": [
+    {
+      "id": "no-id-in-both-splits",
+      "claim": "No post id appears in both the train and test split.",
+      "method": "Set intersection of train_ids and test_ids computed from the persisted split files.",
+      "result": "pass",
+      "evidence": "Intersection size 0 (289 train + 71 test = 360, matching the full dataset exactly)."
+    },
+    {
+      "id": "no-group-in-both",
+      "claim": "No shared entity/group spans the split boundary.",
+      "method": "n/a -- no group key exists for this problem (grain is one row per post, ids confirmed unique in 01-data).",
+      "result": "not_run",
+      "evidence": "No group key applies; recorded as not_run rather than a silent pass, per the kernel's own instruction not to claim a check that doesn't apply as if it were performed."
+    },
+    {
+      "id": "no-duplicate-rows-across-boundary",
+      "claim": "No exact-duplicate caption (a proxy for a duplicate underlying post/promo text) appears on both sides of the split.",
+      "method": "Computed the set of non-null captions on each side of the cutoff and intersected them. 15 exact-duplicate captions exist in the dataset overall (recurring weekly pre-order promo text), checked specifically whether any straddle the boundary.",
+      "result": "pass",
+      "evidence": "Intersection of train captions and test captions is empty -- all 15 duplicate-caption groups fall entirely within one side or the other."
+    },
+    {
+      "id": "every-test-timestamp-after-every-train-timestamp",
+      "claim": "Every test-set posted_at is strictly after every training-set posted_at.",
+      "method": "Computed max(posted_at) on the train side and min(posted_at) on the test side directly from the data.",
+      "result": "pass",
+      "evidence": "max(train.posted_at) = 2026-08-21 18:32:32+02:00, min(test.posted_at) = 2026-08-22 10:27:26+02:00."
+    },
+    {
+      "id": "class-balance-within-tolerance",
+      "claim": "The positive-class rate in test is within a reasonable tolerance of train, per platform and combined.",
+      "method": "Counted label=1 rate in each split, per platform and combined, from the real labeled data.",
+      "result": "pass",
+      "evidence": "facebook: train 42.7% positive, test 41.9% positive (close). instagram: train 50.0% positive, test 64.3% positive (a real gap, driven by only 28 instagram test rows -- flagged in risks, not hidden). Combined: train 45.3%, test 50.7% -- both sides remain non-degenerate for balanced accuracy."
+    },
+    {
+      "id": "column-sets-identical",
+      "claim": "Train and test splits reference the same underlying column set.",
+      "method": "Both split files are id lists (id, platform, posted_at) referencing the same ml/01-data/artifacts/dataset.csv; no separate feature extraction happened per split.",
+      "result": "pass"
+    },
+    {
+      "id": "nothing-fit-outside-training-fold",
+      "claim": "No scaler, imputer, or encoder was fit anywhere in this stage.",
+      "method": "This stage only computed cutoffs and split ids from raw posted_at/label values already present in ml/01-data's output; no transform with learned parameters was applied.",
+      "result": "pass"
+    },
+    {
+      "id": "every-feature-exists-at-prediction-time",
+      "claim": "Re-confirms 01-data's leakage check now that the split is fixed.",
+      "method": "No new features were introduced in this stage; re-affirms 01-data's assertion features-checked-against-prediction-time against the same candidate feature list.",
+      "result": "pass"
+    },
+    {
+      "id": "test-set-touched-zero-times",
+      "claim": "The test set has not yet been used for any model selection, tuning, or threshold choice.",
+      "method": "No model has been trained in this repo as of this stage; only class-balance and timestamp checks (structural facts, not feature-target relationships) were run against the test rows.",
+      "result": "pass"
+    }
+  ],
+  "risks": [
+    {
+      "id": "instagram-test-positive-rate-drift",
+      "description": "Instagram's test-split positive rate (64.3%, 18/28) is notably higher than its train-split rate (50.0%, 52/104) -- a real difference of 4 posts out of 28, plausible as sampling noise at this small n but not confirmed as such.",
+      "severity": "medium",
+      "mitigation": "03-modeling should report balanced accuracy per-platform as well as combined, so this drift is visible rather than averaged away, and should not be surprised if Instagram's test score looks unusually strong or unstable given the small sample."
+    },
+    {
+      "id": "single-holdout-not-rolling",
+      "description": "A single temporal holdout gives one sample of forecast-style performance, not a distribution -- the kernel itself flags this as often not enough to fully trust.",
+      "severity": "low",
+      "mitigation": "Accepted for this project's scale (n=360 total); expanding-window CV within the training set (decision expanding-window-cv-for-tuning) partially compensates by giving multiple temporal estimates during tuning, even though the final test evaluation is still a single holdout."
+    }
+  ],
+  "outputs": [
+    {
+      "name": "Train split ids",
+      "path": "ml/02-split/artifacts/train_ids.csv",
+      "type": "dataset",
+      "description": "289 post ids (id, platform, posted_at) for 2026-04-26 through 2026-08-21."
+    },
+    {
+      "name": "Test split ids",
+      "path": "ml/02-split/artifacts/test_ids.csv",
+      "type": "dataset",
+      "description": "71 post ids (id, platform, posted_at) for 2026-08-22 through 2026-09-22. Not to be touched for model selection or tuning -- single final evaluation only."
+    },
+    {
+      "name": "Stage 02 report",
+      "path": "ml/02-split/report.md",
+      "type": "document"
+    }
+  ],
+  "next_stage_needs": [
+    "03-modeling must load ml/02-split/artifacts/{train_ids,test_ids}.csv and join against ml/01-data/artifacts/dataset.csv rather than re-deriving a split from scratch.",
+    "Use expanding-window (time-ordered, non-shuffled) CV within the 289-row training set for tuning; the test set is touched once, at the very end.",
+    "Report balanced accuracy per-platform as well as combined, given the noted instagram-test-positive-rate-drift risk."
+  ],
+  "split_spec": {
+    "strategy": "temporal",
+    "seed": 0,
+    "test_size": 0.197,
+    "n_folds": 5,
+    "stratify_on": ["platform"],
+    "time_column": "posted_at",
+    "cutoff": "2026-08-22T00:00:00+02:00",
+    "holdout_path": "ml/02-split/artifacts/test_ids.csv"
+  }
+}
