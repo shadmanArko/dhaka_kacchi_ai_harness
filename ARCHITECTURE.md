@@ -614,9 +614,11 @@ living outside the warehouse.
 `'threads'` in `0024`). Organic ingestion from Instagram, Facebook, and Threads
 (`warehouse/ingest/instagram.py`, `warehouse/ingest/facebook.py`, `warehouse/ingest/threads.py`)
 is real and verified against the live Dhaka Kacchi accounts — see `DATA_CONSTRAINTS.md` for
-exactly what's confirmed vs. still gapped (notably: Facebook `reach`/`impressions` unfetched,
-no working metric found yet; Threads `impressions` sourced from Meta's own "in development"
-`views` metric, and `reach`/`saves`/`clicks` have no Threads equivalent at all).
+exactly what's confirmed vs. still gapped (notably: Threads `impressions` sourced from Meta's
+own "in development" `views` metric, and `reach`/`saves`/`clicks` have no Threads equivalent
+at all; Facebook `reach`/`impressions` are now populated too, via `post_total_media_view_unique`/
+`post_media_view` — found 2026-09-23 after the old `post_impressions*` family turned out to be
+fully removed, not just deprecated).
 `channel`/`campaign`/`campaign_variant` now hold real rows too (migration `0027`): one
 channel + one open-ended "ongoing" campaign + one catch-all `bio_link` variant per organic
 platform. `event.channel_id`/`campaign_id`/`campaign_variant_id` resolve against them at

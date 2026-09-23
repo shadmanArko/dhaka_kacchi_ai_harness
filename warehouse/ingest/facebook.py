@@ -22,15 +22,28 @@ VERIFIED against the real Dhaka Kacchi Facebook Page via Graph API Explorer
     working, but returns a NESTED breakdown ({"like": 4}, keyed by reaction
     type), not a plain scalar like Instagram's insights. post_clicks
     confirmed working as a plain scalar.
-  - Not yet found: a working reach/impressions equivalent for Page posts.
-    post_impressions itself is deprecated ("(#100) ... no longer supported
-    for the queried media" / "Starting from version v22.0 ... no longer
-    supported"), confirmed for both video/REELS and image/FEED posts. The
-    non-"_unique" variants (post_impressions_organic, _paid, _viral,
-    _nonviral) are NOT marked deprecated in Meta's docs but were not tested
-    live - reach/impressions are left unfetched (0) in this job until that's
-    done. No "saved" equivalent exists for Facebook posts at all (Instagram-
-    only concept) - saves is always 0 here, deliberately.
+  - RE-VERIFIED 2026-09-23 (after a token rotation - see below): a working
+    reach/impressions equivalent WAS found, but it required checking Meta's
+    OWN current docs, not assuming the blog post's phrasing - post_impressions
+    itself is still fully removed ("(#100) The value must be a valid insights
+    metric"), and so is post_impressions_organic (also invalid - the blog
+    post implying it still works was wrong, or it was removed since).
+    post_media_view ("The number of times your Page's post entered a
+    person's screen" - identical wording to the old deprecated
+    post_impressions) IS a working impressions replacement. post_total_media_
+    view_unique IS a working reach replacement (unique viewers). Both
+    confirmed live against a real post, together with post_reactions_by_type_
+    total/post_clicks in one combined call.
+  - GOTCHA: post_total_media_view_unique's response contains TWO entries for
+    the SAME metric name - one period="lifetime" (the real cumulative total)
+    and one period="day" (a short recent-days breakdown, values near 0 for
+    a post that's been up a while). A naive {item["name"]: ...} dict build
+    lets the "day" entry silently overwrite the "lifetime" one - _fetch_
+    insights below filters to period=="lifetime" specifically to avoid this.
+    No other metric used here has exhibited this multi-period quirk, but the
+    filter is applied uniformly since Meta could add it to any metric later.
+  - No "saved" equivalent exists for Facebook posts at all (Instagram-only
+    concept) - saves is always 0 here, deliberately.
 ======================================================================
 
 SETUP: same Meta Developer App as warehouse/ingest/instagram.py (see that
@@ -82,10 +95,13 @@ POST_FIELDS = (
     "id,message,created_time,permalink_url,attachments{media_type},comments.summary(true),shares"
 )
 
-# Verified against real posts - see module docstring. No impressions/reach
-# equivalent found yet; post_reactions_by_type_total is a nested breakdown,
-# handled specially in transform_and_load, not a plain scalar like post_clicks.
-INSIGHTS_METRICS = "post_reactions_by_type_total,post_clicks"
+# Verified against real posts - see module docstring. post_reactions_by_type_
+# total is a nested breakdown, handled specially in transform_and_load, not a
+# plain scalar like the other three. post_total_media_view_unique needs the
+# period=="lifetime" filter in _fetch_insights below.
+INSIGHTS_METRICS = (
+    "post_reactions_by_type_total,post_clicks,post_media_view,post_total_media_view_unique"
+)
 
 REQUEST_TIMEOUT_S = 30
 
@@ -144,7 +160,15 @@ def _fetch_insights(source: FacebookSourceSettings, post_id: str) -> dict[str, o
         # Same reasoning as instagram.py: one post's metric-availability
         # quirk shouldn't abort the entire run.
         return {}
-    return {item["name"]: item["values"][0]["value"] for item in data.get("data", [])}
+    # period=="lifetime" only - post_total_media_view_unique also returns a
+    # period=="day" entry under the SAME name, which would otherwise
+    # silently overwrite the real lifetime total - see module docstring's
+    # GOTCHA note.
+    return {
+        item["name"]: item["values"][0]["value"]
+        for item in data.get("data", [])
+        if item.get("period") == "lifetime"
+    }
 
 
 def extract(source: FacebookSourceSettings) -> list[dict]:
@@ -281,8 +305,8 @@ def transform_and_load(conn: sa.Connection, *, captured_at: datetime) -> tuple[i
                 {
                     "social_post_id": post_row.id,
                     "captured_at": captured_at,
-                    "impressions": 0,  # not yet found a working metric - see module docstring
-                    "reach": 0,  # same
+                    "impressions": insights.get("post_media_view", 0),
+                    "reach": insights.get("post_total_media_view_unique", 0),
                     "likes": reactions.get("like", 0),
                     "comments": (payload.get("comments") or {})
                     .get("summary", {})
