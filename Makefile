@@ -15,6 +15,7 @@ SEED_REV    := 0012
         verify-ingest-events ingest-instagram ingest-instagram-dry-run \
         ingest-facebook ingest-facebook-dry-run \
         ingest-threads ingest-threads-dry-run \
+        run-detectors \
         current history sql psql revision lint fmt
 
 help:  ## show this help
@@ -111,6 +112,9 @@ ingest-threads:  ## pull organic Threads post data via the Threads API (needs TH
 
 ingest-threads-dry-run:  ## show what ingest-threads would write, without writing
 	$(PY) -m warehouse.ingest.threads --dry-run
+
+run-detectors:  ## run every ops detector, opening/resolving cockpit_alert rows (see ops/run_detectors.py)
+	$(PY) -m ops.run_detectors
 
 current:  ## which revision is applied
 	$(ALEMBIC) current --verbose

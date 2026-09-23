@@ -5,19 +5,36 @@
 # this by hand later, either wipe the volume (destroys all data) or apply
 # the SQL below manually with psql.
 #
-# Creates two databases and four least-privilege roles:
-#   ordering_app     - read-write, owns `ordering`   (used by the ordering
-#                                                       backend, dhaka-kacchi-connect/worker)
-#   warehouse_app    - read-write, owns `warehouse`  (used by this repo)
-#   ordering_reader  - read-only on `ordering`, used ONLY by
-#                       warehouse/ingest/direct.py - so that job can never
-#                       write into the live ordering database, structurally,
-#                       not just by convention.
-#   warehouse_reader - read-only on `warehouse`, the mirror image of
-#                       ordering_reader: used ONLY by dhaka-kacchi-connect's
-#                       admin reporting page (worker/src/lib/
-#                       reportingRepository.ts), so that page can never write
-#                       into the warehouse, structurally.
+# Creates two databases and five least-privilege roles:
+#   ordering_app            - read-write, owns `ordering`   (used by the
+#                              ordering backend, dhaka-kacchi-connect/worker)
+#   warehouse_app           - read-write, owns `warehouse`  (used by this repo)
+#   ordering_reader         - read-only on `ordering`, used ONLY by
+#                              warehouse/ingest/direct.py - so that job can
+#                              never write into the live ordering database,
+#                              structurally, not just by convention.
+#   warehouse_reader        - read-only on `warehouse`, the mirror image of
+#                              ordering_reader: used ONLY by
+#                              dhaka-kacchi-connect's admin reporting page
+#                              (worker/src/lib/reportingRepository.ts), so
+#                              that page can never write into the warehouse,
+#                              structurally.
+#   warehouse_cockpit_writer - UPDATE-only on `warehouse.cockpit_alert`, used
+#                              ONLY by dhaka-kacchi-connect's admin cockpit
+#                              page's acknowledge/resolve actions (worker/src/
+#                              lib/cockpitRepository.ts) - deliberately a
+#                              THIRD, narrower role rather than reusing
+#                              warehouse_reader for this, so a bug in the
+#                              cockpit UI still cannot write into anything
+#                              but this one table, and cannot INSERT/DELETE
+#                              even there (only ops/run_detectors.py, as
+#                              warehouse_app, ever creates a new alert row).
+#
+# This script CANNOT grant UPDATE ON cockpit_alert here - the table doesn't
+# exist yet at first-init time (this repo's own `alembic upgrade head`,
+# run as warehouse_app, creates it later). See deploy/CLAUDE.md's
+# "First-time setup" step that runs right after the schema migration for
+# the one-off GRANT this role still needs.
 #
 # Passwords come from environment variables set in deploy/.env - never
 # hardcoded here. See deploy/CLAUDE.md for the full list of required vars.
@@ -27,12 +44,14 @@ set -euo pipefail
 : "${WAREHOUSE_APP_PASSWORD:?WAREHOUSE_APP_PASSWORD must be set}"
 : "${ORDERING_READER_PASSWORD:?ORDERING_READER_PASSWORD must be set}"
 : "${WAREHOUSE_READER_PASSWORD:?WAREHOUSE_READER_PASSWORD must be set}"
+: "${WAREHOUSE_COCKPIT_WRITER_PASSWORD:?WAREHOUSE_COCKPIT_WRITER_PASSWORD must be set}"
 
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
     CREATE ROLE ordering_app LOGIN PASSWORD '$ORDERING_APP_PASSWORD';
     CREATE ROLE warehouse_app LOGIN PASSWORD '$WAREHOUSE_APP_PASSWORD';
     CREATE ROLE ordering_reader LOGIN PASSWORD '$ORDERING_READER_PASSWORD';
     CREATE ROLE warehouse_reader LOGIN PASSWORD '$WAREHOUSE_READER_PASSWORD';
+    CREATE ROLE warehouse_cockpit_writer LOGIN PASSWORD '$WAREHOUSE_COCKPIT_WRITER_PASSWORD';
 
     CREATE DATABASE ordering OWNER ordering_app;
     CREATE DATABASE warehouse OWNER warehouse_app;
@@ -64,4 +83,11 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "warehouse" <<-EOSQ
     GRANT SELECT ON ALL TABLES IN SCHEMA public TO warehouse_reader;
     ALTER DEFAULT PRIVILEGES FOR ROLE warehouse_app IN SCHEMA public
         GRANT SELECT ON TABLES TO warehouse_reader;
+
+    -- CONNECT/USAGE don't need cockpit_alert to exist, so these two are safe
+    -- here - the actual "GRANT UPDATE ON cockpit_alert" is deliberately NOT
+    -- here (see this file's header comment) and must be run once, by hand,
+    -- right after `alembic upgrade head` - see deploy/CLAUDE.md.
+    GRANT CONNECT ON DATABASE warehouse TO warehouse_cockpit_writer;
+    GRANT USAGE ON SCHEMA public TO warehouse_cockpit_writer;
 EOSQL

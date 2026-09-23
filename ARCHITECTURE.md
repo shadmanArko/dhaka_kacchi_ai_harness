@@ -169,6 +169,20 @@ cockpit_alert   id, agent, alert_key, severity (info|warn|critical), title,
 Agents write to `cockpit_alert` when a threshold is crossed. You acknowledge from the cockpit.
 Resolution is automatic when the underlying metric normalises, or manual when you close it.
 
+**Status (2026-09-23).** The actual implementation is `dhaka-kacchi-connect`'s admin panel
+(`/admin/cockpit`, a Hono route + TanStack page), not a separate FastAPI service — this doc
+predates that repo's Cloudflare-Workers-to-Node port; there is no reason to run a second backend
+just for this one page. `agent_action` ("NEEDS YOUR DECISION") is real schema but genuinely empty
+today: Layer 2's 24 agents/orchestrator don't exist yet, so nothing proposes an action to approve.
+`cockpit_alert` ("PROBLEMS DETECTED") is real and populated: `ops/run_detectors.py` runs three
+plain, deterministic threshold checks (`ops/detectors/`) daily via cron — zero-COGS delivered
+orders, a full week with no new orders, and a week-over-week organic-social engagement drop per
+platform — deliberately NOT the LLM agents section 3/7 describes yet (see that module's own
+docstring for why the `*-detector` agent-name suffix matters). You acknowledge/resolve from the
+cockpit page; those two actions write through a separate, narrowly-scoped `warehouse_cockpit_writer`
+role (UPDATE-only on `cockpit_alert`) rather than widening the reporting page's read-only
+`warehouse_reader` role.
+
 ---
 
 ## 5. Layer 0 — Substrate

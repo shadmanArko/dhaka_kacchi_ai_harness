@@ -24,6 +24,7 @@ services:
       WAREHOUSE_APP_PASSWORD: ${WAREHOUSE_APP_PASSWORD:?set in .env}
       ORDERING_READER_PASSWORD: ${ORDERING_READER_PASSWORD:?set in .env}
       WAREHOUSE_READER_PASSWORD: ${WAREHOUSE_READER_PASSWORD:?set in .env}
+      WAREHOUSE_COCKPIT_WRITER_PASSWORD: ${WAREHOUSE_COCKPIT_WRITER_PASSWORD:?set in .env}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       # Only read on first init against an EMPTY data volume - the official
@@ -55,6 +56,12 @@ services:
       # reportingRepository.ts and this repo's postgres-init/
       # 01-init-databases.sh for the role this connects as.
       WAREHOUSE_DATABASE_URL: postgresql://warehouse_reader:${WAREHOUSE_READER_PASSWORD}@postgres:5432/warehouse?sslmode=disable
+      # A THIRD, narrower cross-repo connection - UPDATE-only on
+      # cockpit_alert, used only by the admin cockpit page's acknowledge/
+      # resolve actions (worker/src/lib/cockpitRepository.ts). Deliberately
+      # separate from WAREHOUSE_DATABASE_URL above rather than widening that
+      # role's grants - see postgres-init/01-init-databases.sh's header.
+      WAREHOUSE_COCKPIT_DATABASE_URL: postgresql://warehouse_cockpit_writer:${WAREHOUSE_COCKPIT_WRITER_PASSWORD}@postgres:5432/warehouse?sslmode=disable
     depends_on:
       postgres:
         condition: service_healthy

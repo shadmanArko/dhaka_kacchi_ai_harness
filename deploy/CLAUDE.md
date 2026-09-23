@@ -74,6 +74,7 @@ This file is "how do I run it / change it."
     30 4 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-instagram >> /opt/dhaka-kacchi/logs/ingest-instagram.log 2>&1
     45 4 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-facebook >> /opt/dhaka-kacchi/logs/ingest-facebook.log 2>&1
     0 5 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-threads >> /opt/dhaka-kacchi/logs/ingest-threads.log 2>&1
+    15 6 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make run-detectors >> /opt/dhaka-kacchi/logs/detectors.log 2>&1
     ```
     The events job runs at :05, not :00 - offset from ingest-direct so the two
     never run concurrently and interleave in a shared log. Separate log file
@@ -93,6 +94,11 @@ This file is "how do I run it / change it."
     (graph.threads.net) and its own quota, so it can't contend with the
     other two even if it did overlap - the stagger is mostly to keep their
     logs from interleaving.
+
+    `run-detectors` (ops/run_detectors.py) runs last, at 6:15am, after every
+    ingest job for the day has had a chance to land - a detector reading
+    stale data would either miss a real problem or, worse, flag one that
+    already cleared hours ago.
 14. Run `scripts/backup.sh` manually once, confirm a new file lands in both
     `/opt/dhaka-kacchi/backups/` AND the Backblaze bucket
     (`rclone ls backblaze-b2:<bucket-name>`), and do one test restore
@@ -176,3 +182,32 @@ Then add `WAREHOUSE_READER_PASSWORD` to `.env` (same value used above),
 data loss, it only adds an env var to an already-running container's
 next start), and `docker compose up -d --build ordering-backend` to pick
 up `WAREHOUSE_DATABASE_URL`.
+
+**Generate the password with `openssl rand -hex 24`, not `-base64`** — a
+base64 password can contain `+`/`/`/`=`, which breaks when embedded
+directly into a plain `postgresql://user:password@host` connection string
+(confirmed the hard way: `TypeError: Invalid URL` from `pg-connection-
+string` the first time this bit us). Hex is always URL-safe.
+
+## Adding the `warehouse_cockpit_writer` role (same situation, one more role)
+
+Same reasoning as `warehouse_reader` above, added 2026-09-23 for the admin
+cockpit page's acknowledge/resolve actions (`worker/src/lib/
+cockpitRepository.ts`) — a narrower, UPDATE-only-on-`cockpit_alert` role,
+deliberately separate from `warehouse_reader` (see postgres-init/01-init-
+databases.sh's header for why). Add it the same way:
+
+```bash
+docker compose exec -T postgres psql -U postgres -c "
+  CREATE ROLE warehouse_cockpit_writer LOGIN PASSWORD '<same value as WAREHOUSE_COCKPIT_WRITER_PASSWORD in .env>';
+"
+docker compose exec -T postgres psql -U postgres warehouse -c "
+  GRANT CONNECT ON DATABASE warehouse TO warehouse_cockpit_writer;
+  GRANT USAGE ON SCHEMA public TO warehouse_cockpit_writer;
+  GRANT UPDATE ON cockpit_alert TO warehouse_cockpit_writer;
+"
+```
+Then add `WAREHOUSE_COCKPIT_WRITER_PASSWORD` to `.env`, `docker compose up
+-d postgres`, and `docker compose up -d --build ordering-backend` to pick
+up `WAREHOUSE_COCKPIT_DATABASE_URL`. Same `openssl rand -hex 24` warning
+as above applies.
