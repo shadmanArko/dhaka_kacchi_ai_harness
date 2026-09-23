@@ -1,0 +1,43 @@
+name: Deploy to VPS
+
+# Every push to main triggers this - this repo's own migrations/verify/gate
+# are cheap to run and idempotent-safe (see deploy/deploy.sh), so there is
+# no path-filtering here the way dhaka-kacchi-connect's deploy-backend.yml
+# has: any change here (a new migration, an ops/ detector, a Makefile
+# target) is worth running the full sequence for, not just a worker/**
+# subset.
+#
+# workflow_dispatch lets this be triggered manually from the Actions tab -
+# useful for the very first run, and for re-running a deploy without an
+# empty commit.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# A second push landing mid-deploy must not run concurrently against the
+# same VPS - `cancel-in-progress: false` (the default) queues it instead of
+# racing two `docker compose` invocations against the same containers.
+concurrency:
+  group: deploy-vps-warehouse
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # The actual deploy logic (migrate -> verify -> gate -> rebuild ->
+      # health-check) lives in deploy/deploy.sh, run over SSH via a
+      # forced-command key that can ONLY execute
+      # /opt/dhaka-kacchi/bin/run-deploy.sh on the VPS - see that file and
+      # deploy/CLAUDE.md's "CI/CD" section for the full security design.
+      # Whatever is passed as `script` below is irrelevant to what actually
+      # runs; it exists only because the action requires a non-empty
+      # command to send.
+      - name: Trigger VPS deploy
+        uses: appleboy/ssh-action@v1.2.5
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          command_timeout: 15m
+          script: echo "triggering warehouse deploy"

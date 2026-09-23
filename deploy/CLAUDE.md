@@ -217,3 +217,73 @@ Then add `WAREHOUSE_COCKPIT_WRITER_PASSWORD` to `.env`, `docker compose up
 -d postgres`, and `docker compose up -d --build ordering-backend` to pick
 up `WAREHOUSE_COCKPIT_DATABASE_URL`. Same `openssl rand -hex 24` warning
 as above applies.
+
+## CI/CD
+
+Two separate, independently-triggered pipelines, added at different times -
+they don't share a workflow or a secret, and touching one never touches
+the other:
+
+- **`dhaka-kacchi-connect`'s `deploy-backend.yml`** (pre-existing) - only
+  on a `worker/**` change, only rebuilds/restarts `ordering-backend`.
+  Deliberately never runs that repo's own `db:migrate` (its schema.sql
+  migrations are a manual, backed-up, human-run step by design - see that
+  repo's own `worker/CLAUDE.md`). Uses secrets `VPS_HOST`/`VPS_USER`/
+  `VPS_SSH_PRIVATE_KEY` in that repo's own GitHub settings, over an
+  unrestricted key (full shell access as the `deploy` user).
+- **This repo's `deploy-vps.yml`** (added 2026-09-23) - on every push to
+  `main`, runs the full sequence in `deploy/deploy.sh`: `alembic upgrade
+  head` → `make verify` → `make gate` → rebuild/restart
+  `ordering-backend` → health-check `https://api.dhakakacchi.com/health`.
+  **Stops before touching the running container if migrations/verify/gate
+  fail** - a bad migration blocks the deploy instead of taking down a
+  currently-healthy backend. Runs over a SEPARATE, purpose-built
+  **forced-command SSH key**: even if `VPS_SSH_PRIVATE_KEY` (this repo's
+  own secret, same name as the connect repo's but a DIFFERENT key/value)
+  ever leaked, it can only execute one fixed script on the VPS, nothing
+  else - no interactive shell, no port forwarding.
+
+### How the forced-command key works
+
+`~deploy/.ssh/authorized_keys` has a line shaped like:
+```
+command="/opt/dhaka-kacchi/bin/run-deploy.sh",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty ssh-ed25519 AAAA...
+```
+Whatever command an SSH client sends is *ignored*; the `command=` clause
+always runs `run-deploy.sh` instead. `deploy-vps.yml`'s `script:` field is
+therefore just a placeholder - the real logic never travels over the wire.
+
+`/opt/dhaka-kacchi/bin/run-deploy.sh` is deliberately **NOT tracked in
+git** - it's the one thing this key can run, so it must never be something
+`git pull` could change out from under a live SSH session. Its only job:
+`git pull origin main` in both repos, then `exec` into
+`dhaka_kacchi_ai_harness/deploy/deploy.sh` (which *is* tracked in git, so
+changes to the actual deploy steps are code-reviewed and history-tracked
+like everything else). `exec`, not a plain call, so a mid-pull script
+replacement can never leave two versions of deploy logic overlapping in
+one process.
+
+### Rotating or losing the key
+
+Generate a fresh one (`ssh-keygen -t ed25519 -f ~/.ssh/github_actions_warehouse_deploy -N ""`
+on the VPS), append the restricted line above to `authorized_keys` with
+the new public key, update the `VPS_SSH_PRIVATE_KEY` secret in this
+repo's GitHub settings with the new private key, and remove the old
+`authorized_keys` line once the new one is confirmed working. `run-
+deploy.sh` and `deploy.sh` need no changes - only the credential rotates.
+
+### First-time setup on a new VPS (if this stack is ever rebuilt elsewhere)
+
+1. `ssh-keygen -t ed25519 -f ~/.ssh/github_actions_warehouse_deploy -N ""`
+   as the `deploy` user.
+2. `mkdir -p /opt/dhaka-kacchi/bin` and create `run-deploy.sh` there with
+   the content described above (not committed anywhere - copy it from
+   this section or from a working VPS).
+3. `chmod +x /opt/dhaka-kacchi/bin/run-deploy.sh`.
+4. Append `command="/opt/dhaka-kacchi/bin/run-deploy.sh",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty `
+   (note the trailing space) immediately before the public key's own
+   content in `~/.ssh/authorized_keys`.
+5. Add `VPS_HOST`/`VPS_USER`/`VPS_SSH_PRIVATE_KEY` to this repo's GitHub
+   secrets (Settings → Secrets and variables → Actions).
+6. Trigger `workflow_dispatch` from the Actions tab once to confirm it
+   works before relying on a real push.
