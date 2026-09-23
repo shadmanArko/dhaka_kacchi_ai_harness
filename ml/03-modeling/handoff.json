@@ -1,0 +1,232 @@
+{
+  "schema_version": "1.4.0",
+  "stage": "03-modeling",
+  "status": "complete",
+  "produced_by": {
+    "skill": "ml-modeling",
+    "skill_version": "1.0.0",
+    "timestamp": "2026-09-23T00:00:00Z",
+    "operator": "shadman.arko@gmail.com"
+  },
+  "bootstrap": {
+    "mode": "handoff",
+    "confidence": "full",
+    "notes": "Read 00-problem-framing, 01-data, and 02-split handoffs directly (same session, same repo). Loaded the persisted split files rather than regenerating a split."
+  },
+  "inputs_consumed": [
+    {
+      "stage": "00-problem-framing",
+      "path": "ml/00-problem-framing/handoff.json",
+      "sha256": "3e26c61510273746f7bea78354168420277de32697fb23e58e82f5d32d313615",
+      "schema_version": "1.4.0"
+    },
+    {
+      "stage": "01-data",
+      "path": "ml/01-data/handoff.json",
+      "sha256": "3b1852117402c7f078b83e7f94cd8283b536e188325249d67344bbcc3dcb1c94",
+      "schema_version": "1.4.0"
+    },
+    {
+      "stage": "02-split",
+      "path": "ml/02-split/handoff.json",
+      "sha256": "6600696b4962fff52f46b24af1f1e5bcf7572fcc766230460a78c9b4a7fe6911",
+      "schema_version": "1.4.0"
+    }
+  ],
+  "decisions": [
+    {
+      "id": "expanding-window-oof-not-cross-val-predict",
+      "decision": "Wrote a manual expanding-window out-of-fold prediction loop instead of sklearn's cross_val_predict.",
+      "rationale": "cross_val_predict requires the CV folds to form a partition of the whole dataset; TimeSeriesSplit's first fold's training rows are never anyone's test fold, so sklearn raises 'cross_val_predict only works for partitions'. The manual loop (ml/03-modeling/train.py::expanding_window_oof) collects predictions only for rows that were actually held out in some fold, which is the honest thing to do for a time-ordered split -- not force a partition that isn't faithful to time order.",
+      "reversible": true
+    },
+    {
+      "id": "one-shared-pipeline-per-candidate",
+      "decision": "Every tuned candidate (logistic regression, random forest, GBDT) shares the same ColumnTransformer (one-hot for nominal, impute+scale for numeric), fit fresh inside each CV fold via a cloned Pipeline.",
+      "rationale": "Keeps preprocessing leakage structurally impossible -- nothing is fit on the full training set before splitting into folds -- and keeps the comparison across families fair (same features, same encoding).",
+      "reversible": true
+    },
+    {
+      "id": "threshold-chosen-on-cv-not-test",
+      "decision": "The operating threshold (0.49) was chosen by sweeping balanced_accuracy over the out-of-fold CV predictions from the winning pipeline, before touching the test set at all.",
+      "rationale": "A threshold tuned on the test set is a threshold trained on the test set. Recorded threshold_chosen_on=cv per the kernel's own requirement.",
+      "reversible": false
+    },
+    {
+      "id": "no-recalibration-applied",
+      "decision": "Checked calibration (Brier score, ROC-AUC on out-of-fold predictions) but did not apply Platt scaling or isotonic recalibration.",
+      "rationale": "Recalibration needs its own held-out slice to fit on, which would mean carving a further split out of an already-small 289-row training set -- the added noise from a smaller calibration fold seemed worse than the miscalibration being corrected, especially since Brier=0.2644 is already close to the ~0.25 an uninformative-but-correctly-calibrated classifier would score at this base rate. Recorded as calibrated=false rather than silently treating 'checked' as equivalent to 'calibrated'.",
+      "reversible": true
+    },
+    {
+      "id": "no-fairness-audit-this-stage",
+      "decision": "No fairness_audit performed.",
+      "rationale": "problem_spec.risk_tier is 'minimal' and protected_attributes is empty -- the schema only requires a fairness_audit for high-risk tiers or declared protected attributes, neither of which applies here.",
+      "reversible": true
+    },
+    {
+      "id": "isolated-ml-venv-not-warehouse-deps",
+      "decision": "scikit-learn/pandas/numpy installed into a separate ml/.venv, not added to the warehouse repo's own pyproject.toml.",
+      "rationale": "pyproject.toml explicitly says this repo is 'Layer 0 warehouse' with a deliberately lean dependency list; ML libraries have no business in the warehouse's own CI/deploy dependency surface (make verify/gate/upgrade never need them). ml/.venv and ml/requirements.txt keep the two concerns separated.",
+      "reversible": true
+    }
+  ],
+  "assertions": [
+    {
+      "id": "both-baselines-scored-before-tuning",
+      "claim": "Both baselines from problem_spec (coin-flip-equivalent dummy, untuned logistic regression on platform+content_type) were scored before any tuning happened.",
+      "method": "train.py scores dummy_stratified and logreg_platform_contenttype_untuned first, unconditionally, before any RandomizedSearchCV call.",
+      "result": "pass",
+      "evidence": "dummy CV balanced_accuracy = 0.4983 (correctly near 0.50, non-degenerate). untuned logreg CV balanced_accuracy = 0.5653."
+    },
+    {
+      "id": "no-fit-outside-pipeline",
+      "claim": "No transformer (encoder, scaler, imputer) was fit on data outside a Pipeline object scoped to a single CV fold.",
+      "method": "Code review of train.py: every candidate is a sklearn Pipeline; make_preprocessor() is only ever instantiated fresh inside a Pipeline passed to RandomizedSearchCV or the manual OOF loop (which clones the pipeline per fold), never called with .fit() directly on the full training set.",
+      "result": "pass"
+    },
+    {
+      "id": "split-loaded-not-regenerated",
+      "claim": "The persisted train/test split from 02-split was loaded directly, not regenerated.",
+      "method": "features.load_dataset() reads ml/02-split/artifacts/{train_ids,test_ids}.csv and filters the cached dataset extract by those exact ids.",
+      "result": "pass"
+    },
+    {
+      "id": "tuning-scored-on-primary-metric",
+      "claim": "All RandomizedSearchCV tuning was scored on balanced_accuracy (problem_spec.primary_metric), not accuracy.",
+      "method": "Code review: scoring=PRIMARY_METRIC='balanced_accuracy' passed to every RandomizedSearchCV call.",
+      "result": "pass"
+    },
+    {
+      "id": "threshold-chosen-on-cv-predictions",
+      "claim": "The operating threshold was chosen on cross-validated (out-of-fold) predictions from the training set, not on the test set.",
+      "method": "Threshold sweep in train.py runs against cv_proba (the expanding-window OOF predict_proba output), computed entirely before X_test/y_test are touched for anything beyond the single final evaluation.",
+      "result": "pass",
+      "evidence": "Chosen threshold = 0.49, CV balanced_accuracy at that threshold = 0.6040."
+    },
+    {
+      "id": "calibration-checked",
+      "claim": "Predicted probabilities were checked for calibration (Brier score, ROC-AUC) before being used as probabilities for thresholding.",
+      "method": "brier_score_loss and roc_auc_score computed on the same out-of-fold CV predictions used for threshold selection.",
+      "result": "pass",
+      "evidence": "CV Brier score = 0.2644 (a coin-flip-calibrated classifier at ~50/50 base rate scores ~0.25, so this is close to uninformative-but-not-miscalibrated -- consistent with a model that has real but modest signal, not a broken probability output)."
+    },
+    {
+      "id": "test-set-evaluated-once",
+      "claim": "The test set was scored exactly once, at the final evaluation, with no re-tuning afterward.",
+      "method": "Single call to best_estimator.predict_proba(X_test) in train.py, after the pipeline was fit once on the full training set with the already-chosen threshold. No code path re-fits or re-thresholds using test results.",
+      "result": "pass"
+    },
+    {
+      "id": "feature-importances-plausible",
+      "claim": "The winning model's top coefficients are plausible (timing and content-type effects), not an implausible near-perfect predictor that would signal leakage.",
+      "method": "Inspected the 10 largest-magnitude logistic regression coefficients by absolute value.",
+      "result": "pass",
+      "evidence": "Top coefficients are hour_bucket=night (+0.86), day_of_week=Saturday (+0.81), day_of_week=Tuesday (+0.60), content_type=reel (+0.60), day_of_week=Friday (-0.58) -- all timing/format effects of the kind a real posting-schedule signal would produce, nothing implausibly dominant."
+    },
+    {
+      "id": "gate-argues-against-the-actual-floor",
+      "claim": "The dl_gate rationale is grounded in the floor 00-problem-framing actually set (0.60), not a restated or moved bar.",
+      "method": "dl_gate.evidence.phase0_floor is read directly from problem_spec.floor.value.",
+      "result": "pass"
+    },
+    {
+      "id": "metrics-match-task-type",
+      "claim": "All reported metrics (balanced_accuracy, Brier, ROC-AUC, confusion matrix) are valid for binary_classification, matching problem_spec.task_type.",
+      "method": "Manual check against problem_spec.task_type=binary_classification: balanced_accuracy/ROC-AUC/confusion matrix/Brier score are all standard binary-classification metrics; none of the regression-only or multiclass-only metrics the kernel warns against (e.g. R2, macro-averaged multiclass F1) were used.",
+      "result": "pass"
+    }
+  ],
+  "risks": [
+    {
+      "id": "cv-score-below-floor-test-score-above",
+      "description": "The winning model's CV estimate (0.5904) is just below the 0.60 floor, while the single test evaluation (0.6179) clears it. With n=71 in the test set, this gap is well within plausible sampling noise, not a confirmed improvement.",
+      "severity": "medium",
+      "mitigation": "Report both numbers plainly rather than only the one that clears the floor. Treat 'clears the floor' as a fragile, not a comfortable, result -- consistent with the floor having been deliberately set to be uncomfortable."
+    },
+    {
+      "id": "gbdt-underperforms-simpler-models",
+      "description": "Gradient-boosted trees (the default escalation per the model-family ordering) scored WORSE on CV (0.5227) than both the untuned baseline logistic regression (0.5653) and the tuned one (0.5904).",
+      "severity": "low",
+      "mitigation": "Not a bug -- directly informs the dl_gate: on this little data (289 training rows), a more flexible model has more room to overfit noise rather than find real signal. Logistic regression was correctly selected as the winner rather than defaulting to the fanciest family tried."
+    },
+    {
+      "id": "instagram-test-set-small",
+      "description": "Per-platform test balanced_accuracy (facebook 0.5811, instagram 0.6889) is computed on only 43 and 28 rows respectively -- individually too small to trust as a stable per-platform estimate.",
+      "severity": "medium",
+      "mitigation": "Reported both, per 02-split's own flagged risk about Instagram's test-set positive-rate drift, but the combined score (0.6179) is the number that should drive any decision, not either platform-specific number alone."
+    },
+    {
+      "id": "onehot-redundant-columns",
+      "description": "is_video (a boolean) was one-hot encoded into two mirror-image columns (is_video_True, is_video_False) rather than a single binary column, since OneHotEncoder doesn't special-case booleans by default.",
+      "severity": "low",
+      "mitigation": "Harmless for logistic regression (just a redundant coefficient pair) but worth a minor pipeline cleanup (drop='if_binary' in OneHotEncoder) if this pipeline is carried forward into stage 05."
+    }
+  ],
+  "outputs": [
+    {
+      "name": "Feature construction module",
+      "path": "ml/03-modeling/features.py",
+      "type": "code",
+      "description": "Deterministic feature builder shared by training now and serving later, per the kernel's training/serving parity rule."
+    },
+    {
+      "name": "Training/evaluation script",
+      "path": "ml/03-modeling/train.py",
+      "type": "code",
+      "description": "Runs baselines, tuning, calibration, threshold selection, and the single final test evaluation. Re-runnable against ml/.venv."
+    },
+    {
+      "name": "Results",
+      "path": "ml/03-modeling/artifacts/results.json",
+      "type": "metrics",
+      "description": "All candidate scores, chosen threshold, calibration metrics, final test confusion matrix, per-platform breakdown, top feature coefficients."
+    },
+    {
+      "name": "Out-of-fold CV predictions",
+      "path": "ml/03-modeling/artifacts/cv_predictions.csv",
+      "type": "dataset",
+      "description": "y_true and predicted probability for every training row that was held out in some CV fold. Not the full training set -- TimeSeriesSplit's earliest chunk is never held out."
+    }
+  ],
+  "next_stage_needs": [
+    "04-deep-learning: this handoff's dl_gate verdict is not_warranted. Do not build a deep model against this project without an explicit, recorded gate_override.",
+    "05-production (if this project proceeds to serving): serve logreg_full_tuned at threshold 0.49, reusing ml/03-modeling/features.py for both training and serving feature construction. Consider drop='if_binary' cleanup on is_video before productionizing.",
+    "Any future re-run: per-platform post volume roughly doubling is the condition that would justify revisiting the dl_gate (see dl_gate.revisit_if)."
+  ],
+  "model_result": {
+    "best_model": "logreg_full_tuned",
+    "primary_metric": "balanced_accuracy",
+    "score": 0.6179,
+    "score_on": "test",
+    "clears_floor": true,
+    "selected_threshold": 0.49,
+    "threshold_rationale": "Threshold sweep over out-of-fold CV predictions from the winning pipeline, selecting the value that maximized balanced_accuracy (0.6040 on CV).",
+    "threshold_chosen_on": "cv",
+    "calibrated": false,
+    "test_evaluations": 1,
+    "candidates": [
+      { "model": "dummy_stratified", "score": 0.4983, "notes": "coin-flip-equivalent baseline, non-degenerate since label is ~50/50 by construction" },
+      { "model": "logreg_platform_contenttype_untuned", "score": 0.5653, "notes": "problem_spec's required untuned baseline" },
+      { "model": "logreg_full_tuned", "score": 0.5904, "notes": "winner; C=2.6366 via RandomizedSearchCV" },
+      { "model": "random_forest_tuned", "score": 0.5509, "notes": "n_estimators=200, max_depth=3, min_samples_leaf=8" },
+      { "model": "gbdt_tuned", "score": 0.5227, "notes": "worse than both logistic regression variants -- see risk gbdt-underperforms-simpler-models" }
+    ]
+  },
+  "dl_gate": {
+    "verdict": "not_warranted",
+    "evidence": {
+      "primary_metric": "balanced_accuracy",
+      "phase0_floor": 0.6,
+      "baseline_dummy": 0.4983,
+      "best_classical": { "model": "logreg_full_tuned", "score": 0.5904, "notes": "score is the CV estimate used for model selection, matching phase0_floor/baseline_dummy which are also CV-basis numbers here; model_result.score=0.6179 is the separate, single test-set evaluation (score_on=test) -- the two are deliberately different measurements, not a reconciliation error." },
+      "headroom_estimate": "Negative-to-flat across families: GBDT (0.5227 CV) scored WORSE than the untuned baseline logistic regression (0.5653 CV) and worse still than the tuned one (0.5904 CV). A tight, inverted spread like this is the kernel's own signal that the ceiling is in the data, not the model -- there is no evidence more model capacity would help, and real evidence (GBDT's underperformance on n=289) that it currently hurts."
+    },
+    "rationale": "Input is tabular/short-categorical (platform, content_type, day-of-week, hour-bucket) plus two cheap derived numeric features (caption length, hashtag count) -- no raw text embeddings or pixel features were used, per 00-problem-framing's own scoping decision that a frozen pretrained embedding would only be added as a feature if a classical baseline showed enough promise to justify it. On 289 training rows, a more flexible model family (GBDT) already performs worse than plain logistic regression on the same CV protocol used for model selection, which is direct evidence against, not for, adding still more capacity via a neural network. The gate is argued from the CV comparison (0.5904 vs 0.5227 vs 0.4983 floor/dummy), not from the single test-set number (0.6179) recorded separately in model_result -- a neural network trained on 289 rows of five sparse categorical features and two numeric ones would have no realistic path to outperform what a well-regularized linear model already does here, and would cost real interpretability the operator explicitly asked for (problem_spec.constraints.explainability_required=true).",
+    "revisit_if": [
+      "Per-platform post volume roughly doubles (matching 00-problem-framing's own stopping-condition language), giving enough data for a more flexible model to plausibly find signal a linear model can't.",
+      "A caption text feature (frozen pretrained embedding, per 00-problem-framing's transfer-learning decision) is added AND shown via ablation to carry meaningful signal on its own -- at that point representation learning on the caption specifically (not the whole tabular problem) could become warranted, distinct from training a network on the current five features.",
+      "Threads engagement data (currently near-zero, excluded from this project) becomes usable and the combined dataset grows enough to support per-platform models with real per-platform sample sizes."
+    ]
+  }
+}

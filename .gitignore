@@ -8,3 +8,7 @@ __pycache__/
 
 # ML pipeline: cached data extracts (regenerable from the live warehouse, may contain real captions)
 ml/*/artifacts/*.csv
+
+# ML pipeline: isolated venv for ml/ work, kept separate from the warehouse's own deps
+ml/.venv/
+ml/03-modeling/artifacts/cv_predictions.csv
