@@ -595,11 +595,13 @@ living outside the warehouse.
 
 **Status.** Steps 1, 2, and 4 of the build sequence below are built: `event_taxonomy`/`event`
 (migrations `0014`-`0016`), `channel`/`campaign`/`campaign_variant` (`0017`-`0020`), and
-`social_post`/`social_metrics_snapshot` (`0021`-`0023`). Organic ingestion from both Instagram
-and Facebook (`warehouse/ingest/instagram.py`, `warehouse/ingest/facebook.py`) is real and
-verified against the live Dhaka Kacchi accounts — see `DATA_CONSTRAINTS.md` for exactly what's
-confirmed vs. still gapped (notably: Facebook `reach`/`impressions` unfetched, no working metric
-found yet). Threads (also step 4's `platform` scope) is not yet built.
+`social_post`/`social_metrics_snapshot` (`0021`-`0023`, `platform` widened to include
+`'threads'` in `0024`). Organic ingestion from Instagram, Facebook, and Threads
+(`warehouse/ingest/instagram.py`, `warehouse/ingest/facebook.py`, `warehouse/ingest/threads.py`)
+is real and verified against the live Dhaka Kacchi accounts — see `DATA_CONSTRAINTS.md` for
+exactly what's confirmed vs. still gapped (notably: Facebook `reach`/`impressions` unfetched,
+no working metric found yet; Threads `impressions` sourced from Meta's own "in development"
+`views` metric, and `reach`/`saves`/`clicks` have no Threads equivalent at all).
 `order_attribution`, `promotion`, and `experiment` are not yet built. See
 `DATA_CONSTRAINTS.md` for the precise, current real/stand-in/designed-only breakdown.
 

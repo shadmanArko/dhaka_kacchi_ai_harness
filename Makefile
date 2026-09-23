@@ -14,6 +14,7 @@ SEED_REV    := 0012
         verify-ingest-direct ingest-events ingest-events-dry-run \
         verify-ingest-events ingest-instagram ingest-instagram-dry-run \
         ingest-facebook ingest-facebook-dry-run \
+        ingest-threads ingest-threads-dry-run \
         current history sql psql revision lint fmt
 
 help:  ## show this help
@@ -104,6 +105,12 @@ ingest-facebook:  ## pull Facebook Page posts via the Meta Graph API (needs FACE
 
 ingest-facebook-dry-run:  ## show what ingest-facebook would write, without writing
 	$(PY) -m warehouse.ingest.facebook --dry-run
+
+ingest-threads:  ## pull organic Threads post data via the Threads API (needs THREADS_ACCESS_TOKEN - see warehouse/ingest/threads.py)
+	$(PY) -m warehouse.ingest.threads
+
+ingest-threads-dry-run:  ## show what ingest-threads would write, without writing
+	$(PY) -m warehouse.ingest.threads --dry-run
 
 current:  ## which revision is applied
 	$(ALEMBIC) current --verbose

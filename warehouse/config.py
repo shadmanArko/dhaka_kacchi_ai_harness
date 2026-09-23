@@ -245,6 +245,55 @@ def load_facebook_source_settings(
     return FacebookSourceSettings(access_token=access_token, page_id=page_id)
 
 
+@dataclass(frozen=True, slots=True)
+class ThreadsSourceSettings:
+    """Config for reading Threads post data via the Threads API (the
+    'threads' ingestion channel - see warehouse/ingest/threads.py and
+    ARCHITECTURE.md section 4.7).
+
+    A genuinely separate credential from InstagramSourceSettings/
+    FacebookSourceSettings, not just a separate config name for the same
+    value: Threads has its own App ID/Secret and its own token-issuing host
+    (graph.threads.net, not graph.facebook.com/oauth), so this token cannot
+    be the same value as the other two even in principle.
+    """
+
+    access_token: str
+    user_id: str
+
+
+def load_threads_source_settings(
+    environ: Mapping[str, str] | None = None,
+) -> ThreadsSourceSettings:
+    """Fail-fast config for warehouse/ingest/threads.py. Same idiom as
+    load_instagram_source_settings()/load_facebook_source_settings().
+    """
+    if environ is None:
+        load_dotenv(ENV_FILE, override=False)
+        environ = os.environ
+
+    access_token = (environ.get("THREADS_ACCESS_TOKEN") or "").strip()
+    if not access_token:
+        raise ConfigError(
+            "THREADS_ACCESS_TOKEN is required and has no default.\n"
+            "  Set it in the process environment, or add it to "
+            f"{ENV_FILE} (see .env.example). Requires a Threads Tester role "
+            "on the Meta app plus a long-lived token from that app's "
+            "'Access the Threads API' use case - see warehouse/ingest/"
+            "threads.py's module docstring for setup steps."
+        )
+
+    user_id = (environ.get("THREADS_USER_ID") or "").strip()
+    if not user_id:
+        raise ConfigError(
+            "THREADS_USER_ID is required and has no default.\n"
+            "  Set it in the process environment, or add it to "
+            f"{ENV_FILE} (see .env.example)."
+        )
+
+    return ThreadsSourceSettings(access_token=access_token, user_id=user_id)
+
+
 def _main(argv: list[str]) -> int:
     """`python -m warehouse.config [print-url]` - used by `make psql`."""
     try:
