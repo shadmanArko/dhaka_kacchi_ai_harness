@@ -16,9 +16,11 @@
 # FAILS LOUDLY (set -e) AND STOPS BEFORE TOUCHING THE RUNNING CONTAINER if
 # migrations, verify, or the margin gate fail - a bad migration blocks the
 # deploy instead of taking down a currently-healthy production backend.
-# `docker compose up -d --build ordering-backend` is the last write this
-# script makes for a reason: everything before it only runs disposable,
-# --rm containers.
+# The `docker compose up -d --build` calls for predictor then ordering-backend
+# are the last writes this script makes, in that order (ordering-backend
+# depends_on predictor's healthcheck, so it won't start against a broken
+# predictor build) - everything before them only runs disposable, --rm
+# containers.
 set -euo pipefail
 
 DEPLOY_DIR=/opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy
@@ -38,6 +40,9 @@ docker compose run --rm warehouse make verify
 
 log "checking the phase-1 margin gate (make gate)..."
 docker compose run --rm warehouse make gate
+
+log "rebuilding and restarting the post-engagement predictor..."
+docker compose up -d --build predictor
 
 log "rebuilding and restarting the ordering backend..."
 docker compose up -d --build ordering-backend

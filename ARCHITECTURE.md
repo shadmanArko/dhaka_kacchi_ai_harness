@@ -655,6 +655,26 @@ stand-in dataset first — the same pattern already used for the review-intellig
 stand-in — and swap in real data once volume supports it. See `DATA_CONSTRAINTS.md` for what is
 currently real, stand-in, or designed-only.
 
+### 4.8 Social post engagement predictor
+
+Built once `social_post`/`social_metrics_snapshot` (§4's ingest jobs) had accumulated enough real
+posts to be worth modeling (2026-09-23) — a small, deliberately classical pipeline in `ml/`,
+following the staged `00-problem-framing` → `01-data` → `02-split` → `03-modeling` →
+`05-production` contract (each stage's `report.md`/`handoff.json` is the actual record; this is
+just a pointer). Predicts whether a drafted, not-yet-published Instagram or Facebook post is
+likely to land above or below that platform's own typical engagement, from pre-publish features
+only (platform, content_type, caption stats, planned day/hour) — purely advisory, the operator
+decides whether to act on it.
+
+The **deep-learning gate** (`ml/03-modeling/handoff.json`) came back `not_warranted`: on 289
+training rows, gradient-boosted trees scored *worse* than plain logistic regression, which is
+itself the evidence against reaching for more model capacity. Served by `predictor/`, a small
+internal-only FastAPI service reached only by `dhaka-kacchi-connect`'s admin backend over the
+docker-compose network (never exposed publicly) — see that repo's `/admin/post-predict` page and
+this repo's `deploy/docker-compose.yml`/`deploy/deploy.sh` for how it's wired into the existing
+CI/CD pipeline. See `DATA_CONSTRAINTS.md` for current verification status and
+`ml/05-production/model_card.md` for intended use and limitations.
+
 ---
 
 ## 6. Layer 1 — Derived assets
@@ -838,6 +858,10 @@ dhaka-kacchi-harness/
     migrations/
     ingest/<source>.py
     models/                 SQL views: unit economics, cohort, menu margin
+  ml/                       staged ML pipeline (see §4.8) - 00-problem-framing/
+                            through 05-production/, each a report.md + handoff.json
+  predictor/                serves ml/05-production's model - internal-only FastAPI,
+                            see §4.8
   tools/                    one MCP server per directory
     warehouse/
     ordering-backend/

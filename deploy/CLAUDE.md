@@ -114,6 +114,7 @@ Run these from `deploy/` on the VPS.
 | See what's running | `docker compose ps` |
 | View logs | `docker compose logs -f ordering-backend` |
 | Restart the ordering backend after a code change | `docker compose up -d --build ordering-backend` |
+| Restart the post-engagement predictor after retraining (`ml/05-production/build_artifact.py`) or a code change | `docker compose up -d --build predictor` |
 | Run a warehouse command | `docker compose run --rm warehouse <command>`, e.g. `make gate` |
 | Apply a new warehouse migration | `docker compose run --rm warehouse uv run alembic upgrade head` |
 | Apply a new ordering-backend schema change | `docker compose run --rm ordering-backend npm run db:migrate` (see the DROP TABLE warning in that repo's `worker/CLAUDE.md` first) |
@@ -233,8 +234,12 @@ the other:
   unrestricted key (full shell access as the `deploy` user).
 - **This repo's `deploy-vps.yml`** (added 2026-09-23) - on every push to
   `main`, runs the full sequence in `deploy/deploy.sh`: `alembic upgrade
-  head` → `make verify` → `make gate` → rebuild/restart
+  head` → `make verify` → `make gate` → rebuild/restart `predictor`
+  (see §4.8 in ARCHITECTURE.md) → rebuild/restart
   `ordering-backend` → health-check `https://api.dhakakacchi.com/health`.
+  `ordering-backend` `depends_on` `predictor`'s healthcheck, so a broken
+  predictor build blocks the ordering-backend restart rather than leaving
+  a half-deployed stack.
   **Stops before touching the running container if migrations/verify/gate
   fail** - a bad migration blocks the deploy instead of taking down a
   currently-healthy backend. Runs over a SEPARATE, purpose-built

@@ -1,0 +1,10 @@
+# Pinned to match ml/requirements.txt exactly for the sklearn/pandas/numpy/joblib
+# versions - a version mismatch between training and serving is a training-serving
+# skew bug, the same class of bug as reimplementing feature logic separately.
+scikit-learn==1.9.1
+pandas==3.0.6
+numpy==2.5.3
+joblib==1.6.0
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4

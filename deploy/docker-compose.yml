@@ -62,9 +62,34 @@ services:
       # separate from WAREHOUSE_DATABASE_URL above rather than widening that
       # role's grants - see postgres-init/01-init-databases.sh's header.
       WAREHOUSE_COCKPIT_DATABASE_URL: postgresql://warehouse_cockpit_writer:${WAREHOUSE_COCKPIT_WRITER_PASSWORD}@postgres:5432/warehouse?sslmode=disable
+      # Internal-only post-engagement predictor (ml/00-problem-framing through
+      # ml/05-production in this repo) - reached over the docker network only,
+      # never exposed publicly. See dhaka-kacchi-connect's own admin route
+      # that proxies to this.
+      PREDICTOR_URL: http://predictor:8000
     depends_on:
       postgres:
         condition: service_healthy
+      predictor:
+        condition: service_healthy
+    networks: [dhaka-kacchi]
+
+  # Serves ml/05-production's trained model (see that directory's report.md
+  # and handoff.json for how it was chosen). Built from a baked-in model
+  # artifact + the exact feature code used in training - see predictor/
+  # Dockerfile for how those get into the image. No ports published: this is
+  # reached only by ordering-backend, over PREDICTOR_URL above.
+  predictor:
+    build:
+      context: ..
+      dockerfile: predictor/Dockerfile
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/ready').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     networks: [dhaka-kacchi]
 
   # Never started by `docker compose up` - `profiles: [cron]` means it's

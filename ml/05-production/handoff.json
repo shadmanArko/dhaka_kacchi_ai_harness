@@ -1,0 +1,246 @@
+{
+  "schema_version": "1.4.0",
+  "stage": "05-production",
+  "status": "complete",
+  "produced_by": {
+    "skill": "ml-production",
+    "skill_version": "1.0.0",
+    "timestamp": "2026-09-23T00:00:00Z",
+    "operator": "shadman.arko@gmail.com"
+  },
+  "bootstrap": {
+    "mode": "reconstructed",
+    "confidence": "reduced",
+    "notes": "03-modeling's own handoff.json was read directly with full confidence (sha256 verified below) - but the immediately-preceding stage in the numbered chain, 04-deep-learning, has no handoff.json at all, since its dl_gate verdict (not_warranted) was correctly never overridden and the stage never ran. Per the kernel's bootstrap protocol, a missing immediate predecessor makes this stage's overall bootstrap 'reconstructed', not 'handoff', even though the actual model_result/problem_spec this stage depends on came from a real, unbroken handoff one stage further back."
+  },
+  "inputs_consumed": [
+    {
+      "stage": "03-modeling",
+      "path": "ml/03-modeling/handoff.json",
+      "sha256": "9e062729f16a8622f756736bfc364a5e58de092ecbea65c10397ac7bb727056c",
+      "schema_version": "1.4.0"
+    }
+  ],
+  "decisions": [
+    {
+      "id": "internal-fastapi-service",
+      "decision": "Serve the model behind a small internal-only FastAPI service (predictor/), reached by the dhaka-kacchi-connect admin backend over the docker-compose network, never exposed to the internet.",
+      "rationale": "Confirmed with the user directly (AskUserQuestion) over two alternatives: batch/offline-only (rejected - the user explicitly wants a live 'type a caption, get a flag' UI experience) and porting the model into Node/JS (rejected - couples retraining to a manual code port and risks training-serving skew). A tiny internal service keeps Python-model logic in Python, cleanly separated from the Node backend, and matches this repo's own deploy/CLAUDE.md 'Adding a future second backend' pattern exactly.",
+      "reversible": true
+    },
+    {
+      "id": "refit-on-train-plus-test",
+      "decision": "The shipped artifact is refit on ALL 360 labeled rows (train + the now-spent test split), using the exact hyperparameters (C=2.6366...) chosen in stage 03 - no re-tuning.",
+      "rationale": "The test split's job (an honest, single, final evaluation) is done; refitting on more data before shipping is standard practice and does not re-use the test set for any decision - only the already-fixed hyperparameters are reused, so this is not a second use of the test set for model selection.",
+      "reversible": true
+    },
+    {
+      "id": "training-serving-parity-via-file-copy",
+      "decision": "ml/03-modeling/features.py is copied verbatim into the served image at Docker build time (predictor/Dockerfile's COPY line), not reimplemented in the service.",
+      "rationale": "This is the kernel's 'one code path' defense against training-serving skew, in the simplest form available without a shared package registry: the exact same file, not a hand-ported equivalent. A parity test (running the same input through both paths) was not built as a separate CI check - see risks.",
+      "reversible": true
+    },
+    {
+      "id": "artifact-hash-verified-at-startup",
+      "decision": "The service refuses to load model.joblib if its SHA-256 doesn't match model.sha256 (written alongside it at training time), verified explicitly in predictor/app/model.py before build_artifact.py's own joblib.load() ever runs.",
+      "rationale": "joblib.load wraps pickle - loading the artifact executes arbitrary code. Per the kernel's own security section, an artifact this class of executable needs the same provenance-check discipline as a code deploy: hash recorded at build, verified at load, refuse on mismatch rather than degrade silently.",
+      "reversible": false
+    },
+    {
+      "id": "explainability-via-linear-coefficients",
+      "decision": "Per-request 'why' is computed as coefficient x encoded-feature-value for the top 5 by magnitude, not SHAP or a separate explainability library.",
+      "rationale": "Only valid because the winning model is linear (logistic regression) - this method would not generalize to a tree model. Chosen because it's exact (not an approximation like SHAP would need to be for a black-box model) and needs no extra dependency, matching problem_spec.constraints.explainability_required=true cheaply.",
+      "reversible": true
+    },
+    {
+      "id": "no-shadow-or-canary-rollout",
+      "decision": "Deployed directly (rollout.strategy=direct), no shadow run or canary period.",
+      "rationale": "Single internal operator, advisory-only output with no automated effect, a few predictions a day at most. The blast radius of a bad prediction is one person second-guessing one social post - shadow/canary infrastructure would cost more to build and maintain than the risk being protected against justifies at this scale.",
+      "reversible": true
+    },
+    {
+      "id": "manual-retraining-trigger",
+      "decision": "retraining.trigger=manual, no scheduled or drift-triggered retraining pipeline built.",
+      "rationale": "At ~15-20 new posts a month combined across both platforms, automatic retraining would fire on almost no new data each time and mostly re-confirm the same 360-row fit. Re-running ml/01 through ml/03/05 by hand once post volume has grown meaningfully (see dl_gate.revisit_if in 03-modeling) is the right cadence for a project this size.",
+      "reversible": true
+    },
+    {
+      "id": "logging-not-full-observability-stack",
+      "decision": "Structured JSON logging (request id, model version, platform, label, probability, latency) to stdout only - no dashboard, no drift detection job, no alerting built this pass.",
+      "rationale": "Honest scope-matching: a full monitoring stack (PSI/KS drift checks, alerting) is disproportionate to a single-operator, few-predictions-a-day internal tool. Logs are the real, inspectable record if something looks wrong; automated monitoring is a stated gap, not a silent one - see risks.",
+      "reversible": true
+    }
+  ],
+  "assertions": [
+    {
+      "id": "served-threshold-matches-stage-03",
+      "claim": "The threshold served (0.49) is read from stage 03's model_metadata.json, not hardcoded separately or left at the sklearn default of 0.5.",
+      "method": "ml/05-production/build_artifact.py reads chosen_threshold from ml/03-modeling/artifacts/results.json and writes it into model_metadata.json; predictor/app/model.py reads threshold from that same metadata file at load time.",
+      "result": "pass",
+      "evidence": "model_metadata.json's threshold field = 0.49, confirmed via a live /v1/predict call returning threshold: 0.49 in the response."
+    },
+    {
+      "id": "same-pipeline-object-served",
+      "claim": "The object served is the actual fitted sklearn Pipeline (preprocessing + classifier together), not a hand-reimplemented scoring function.",
+      "method": "build_artifact.py serializes the whole Pipeline (ColumnTransformer + LogisticRegression) via joblib.dump; predictor/app/model.py loads it via joblib.load and calls .predict_proba() on it directly.",
+      "result": "pass"
+    },
+    {
+      "id": "parity-test-not-automated",
+      "claim": "A parity test comparing offline (training-time) and online (serving-time) feature values for the same input.",
+      "method": "Not built as an automated CI check. Manual parity was exercised instead: the exact same features.py file is copied byte-for-byte into the served image (see decision training-serving-parity-via-file-copy), and live end-to-end predictions were verified against known feature values during manual testing.",
+      "result": "not_run",
+      "evidence": "Recorded honestly as not_run rather than claimed as pass - file-identity is a strong argument for parity but is not the same as an executed, repeatable test."
+    },
+    {
+      "id": "latency-measured",
+      "claim": "Response latency measured against problem_spec's latency budget.",
+      "method": "problem_spec.constraints.latency_budget = 'not latency-sensitive; a single prediction can take seconds'. Manual local testing (curl against the running service) observed sub-100ms responses for single predictions, well inside that budget.",
+      "result": "pass",
+      "evidence": "No formal p50/p99 load test was run - single-operator, a-few-times-a-day traffic makes one not currently worth building."
+    },
+    {
+      "id": "rollback-tested",
+      "claim": "Rollback (reverting to a previous model version) was tested, not assumed.",
+      "method": "Not run. There is exactly one model version (2026-09-23-logreg-v1) and no prior version to roll back to yet.",
+      "result": "not_run",
+      "evidence": "Recorded honestly - the mechanism (docker-compose rebuilds from whatever ml/05-production/artifacts/ contains at that commit, so `git revert` on that directory is the rollback path) has not been exercised."
+    },
+    {
+      "id": "shadow-run-completed",
+      "claim": "A shadow run against live traffic was completed before serving.",
+      "method": "Not run - see decision no-shadow-or-canary-rollout for why this was deliberately skipped at this scale.",
+      "result": "not_run"
+    },
+    {
+      "id": "artifact-hash-recorded-and-verified",
+      "claim": "The model artifact's SHA-256 was recorded at build time and is verified before every load.",
+      "method": "Verified using the ml-kernel's own scripts/verify_artifact.py against the built artifact, and confirmed the service's own startup check (predictor/app/model.py) refuses to load on a deliberately corrupted hash file (tested manually: replaced model.sha256 with a wrong value, confirmed the service logs model_load_failed and /ready returns 503).",
+      "result": "pass",
+      "evidence": "sha256 = d15dd7cd3f2315b97a59e380a281704f36e3cbbfa27e29b0de5bca8050565b72 (see ml/05-production/artifacts/model.sha256). verify_artifact.py confirms 'hash matches the expected value'."
+    },
+    {
+      "id": "secrets-not-in-image-or-config",
+      "claim": "No secrets are baked into the predictor image or its config.",
+      "method": "Manual review of predictor/Dockerfile, docker-compose.yml's predictor service block, and predictor/app/*.py - the service takes no credentials at all (it only loads a local model file and serves HTTP), so there is nothing to leak.",
+      "result": "pass"
+    },
+    {
+      "id": "raw-input-not-logged",
+      "claim": "Raw caption text is never written to logs.",
+      "method": "Code review of predictor/app/main.py's logging call - it logs request_id, model_version, platform, label, probability, latency_ms only. The caption string itself never appears in any log statement.",
+      "result": "pass"
+    },
+    {
+      "id": "endpoint-versioned",
+      "claim": "The endpoint is versioned and returns the model version in its response.",
+      "method": "Route is dhaka-kacchi-connect's POST /v1/admin/post-predict (the /v1 prefix is this backend's existing API version, applied uniformly - not a new versioning scheme just for this feature); the predictor service's own response and the proxied admin response both include model_version.",
+      "result": "pass"
+    },
+    {
+      "id": "end-to-end-verified-live",
+      "claim": "The full chain (admin frontend -> Node backend -> internal predictor service) was exercised live, not just unit-tested in isolation.",
+      "method": "Ran all three pieces locally (predictor via its own isolated venv, the Node worker with PREDICTOR_URL pointed at it, the Vite frontend dev server), created a throwaway local-only admin test account, logged in through the real browser UI, submitted a real draft post through the /admin/post-predict form, and confirmed a real prediction rendered with plausible reasons. Deleted the throwaway test account afterward.",
+      "result": "pass",
+      "evidence": "Live UI result: 'Likely below typical engagement', 47% confidence, top reasons is_video=True (+0.45), hashtag_count (-0.43), hour_bucket_evening (-0.31) - consistent with the coefficients reported in ml/03-modeling/report.md."
+    }
+  ],
+  "risks": [
+    {
+      "id": "docker-build-not-verified-in-this-session",
+      "description": "The actual `docker compose build predictor` was never run in this session - no Docker daemon was available. Verification instead used an identical file layout (app/ + model/ directories matching the Dockerfile's COPY destinations exactly) run through the real predictor/.venv and a real uvicorn process, plus a full live click-through in the browser.",
+      "severity": "medium",
+      "mitigation": "The first real deploy (git push to main, per this repo's existing CI/CD) will build the actual image for the first time. If it fails, the failure is caught by deploy.sh's own health-check gate before ordering-backend is touched (predictor's healthcheck blocks ordering-backend's depends_on), so a broken predictor build cannot silently break the live site - but this is still the first real test of the Dockerfile itself."
+    },
+    {
+      "id": "no-automated-parity-test",
+      "description": "Training/serving parity relies on features.py being copied verbatim at build time, not on an executed, repeatable test that would catch a future accidental divergence (e.g. someone editing the copy in predictor/ instead of the source in ml/03-modeling/).",
+      "severity": "low",
+      "mitigation": "The Dockerfile's own comment states the file must come from ml/03-modeling/features.py, not be hand-edited in place. A CI parity test is a reasonable future addition, not built this pass."
+    },
+    {
+      "id": "no-monitoring-dashboard",
+      "description": "Only structured stdout logs exist - no drift detection, no dashboard, no alerting.",
+      "severity": "low",
+      "mitigation": "Deliberately scoped to the project's actual size (single operator, low volume) rather than over-built. docker compose logs predictor is the real, available inspection path if something looks wrong."
+    },
+    {
+      "id": "onehot-redundant-columns-carried-into-production",
+      "description": "The is_video boolean is still one-hot encoded into two mirror-image columns in the shipped artifact (same issue noted in 03-modeling's risks) - harmless for a linear model but slightly wasteful.",
+      "severity": "low",
+      "mitigation": "Cosmetic; not worth a re-fit just for this. Fix (OneHotEncoder(drop='if_binary')) the next time the model is retrained for a real reason."
+    }
+  ],
+  "outputs": [
+    {
+      "name": "Model artifact",
+      "path": "ml/05-production/artifacts/model.joblib",
+      "type": "model",
+      "description": "Fitted sklearn Pipeline (ColumnTransformer + LogisticRegression, C=2.6366), refit on all 360 labeled rows. sha256 d15dd7cd3f2315b97a59e380a281704f36e3cbbfa27e29b0de5bca8050565b72."
+    },
+    {
+      "name": "Artifact build script",
+      "path": "ml/05-production/build_artifact.py",
+      "type": "code"
+    },
+    {
+      "name": "Model card",
+      "path": "ml/05-production/model_card.md",
+      "type": "document"
+    },
+    {
+      "name": "Predictor service",
+      "path": "predictor/",
+      "type": "code",
+      "description": "FastAPI app (app/main.py, model.py, schemas.py), Dockerfile, requirements.txt. Internal-only, wired into deploy/docker-compose.yml and deploy/deploy.sh in this repo."
+    },
+    {
+      "name": "Admin backend route",
+      "path": "../dhaka-kacchi-connect/worker/src/index.ts (adminPostPredictRoute) + worker/src/lib/predictorClient.ts",
+      "type": "code",
+      "description": "Sibling repo. POST /v1/admin/post-predict, proxies to the internal predictor service."
+    },
+    {
+      "name": "Admin frontend page",
+      "path": "../dhaka-kacchi-connect/src/routes/admin/_layout.post-predict.tsx",
+      "type": "code",
+      "description": "Sibling repo. Form + result display, wired into the admin nav."
+    }
+  ],
+  "next_stage_needs": [
+    "First real push to main will build predictor/Dockerfile on the actual VPS for the first time - watch that deploy closely (docker compose logs predictor) rather than assuming the local-file-layout verification generalizes perfectly to the real Docker build.",
+    "Once real usage accumulates (the operator actually uses /admin/post-predict against real drafts), it's worth manually comparing a handful of predictions against what the post actually did after publishing - an informal, manual check on real-world calibration, not a formal monitoring pipeline.",
+    "Retraining is manual - re-run ml/00 through ml/03 (order matters) then ml/05-production/build_artifact.py once post volume has grown enough to matter (see ml/03-modeling's dl_gate.revisit_if)."
+  ],
+  "serving_spec": {
+    "inference_mode": "realtime",
+    "model_uri": "ml/05-production/artifacts/model.joblib",
+    "threshold_served": 0.49,
+    "serving_stack": "FastAPI + uvicorn, internal-only docker-compose service (predictor/), proxied by dhaka-kacchi-connect's Node/Hono admin backend",
+    "meets_latency_budget": true,
+    "monitoring": {
+      "drift_checks": [],
+      "performance_metric": "balanced_accuracy",
+      "label_latency": "hours to a few days (engagement accumulates after publishing)",
+      "proxy_metrics": ["prediction label distribution (from structured logs)", "prediction volume (requests/day)"],
+      "alerting": "none automated - docker compose logs predictor is the manual inspection path"
+    },
+    "retraining": {
+      "trigger": "manual",
+      "cadence": "no fixed cadence - re-run when post volume has grown meaningfully, see ml/03-modeling's dl_gate.revisit_if",
+      "orchestrator": "none - manual script sequence (ml/01-data/extract.py -> ml/03-modeling/train.py -> ml/05-production/build_artifact.py)",
+      "rollback": "git revert on ml/05-production/artifacts/ + predictor/, then re-deploy via the existing CI/CD pipeline"
+    },
+    "rollout": {
+      "strategy": "direct",
+      "shadow_run_completed": false,
+      "notes": "See decision no-shadow-or-canary-rollout for why - single internal operator, advisory-only, low volume."
+    },
+    "governance": {
+      "model_card_path": "ml/05-production/model_card.md",
+      "risk_tier": "minimal",
+      "human_oversight": "The operator reviews every prediction before deciding whether to act on it; the prediction has no automated effect on publishing or anything else.",
+      "logging_retention": "Container stdout logs only, retention governed by the VPS's own Docker logging driver defaults - not a formally configured retention policy."
+    }
+  }
+}
