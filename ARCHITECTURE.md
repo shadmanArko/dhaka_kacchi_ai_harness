@@ -675,6 +675,20 @@ this repo's `deploy/docker-compose.yml`/`deploy/deploy.sh` for how it's wired in
 CI/CD pipeline. See `DATA_CONSTRAINTS.md` for current verification status and
 `ml/05-production/model_card.md` for intended use and limitations.
 
+### 4.9 Social share database
+
+A "data product" pattern for handing organic social post data to an outside
+collaborator without giving them any access to the live warehouse: `social_share` is a
+genuinely separate Postgres database (own entry in Postgres's own list of databases,
+alongside `ordering`/`warehouse` — not a schema or a narrower role inside `warehouse`)
+holding one flat, read-only table (`social_post_metrics`), refreshed daily on cron by
+`ops/refresh_social_share.py`. The collaborator's Postgres role (`social_share_reader`)
+cannot even *connect* to `ordering` or `warehouse` — `REVOKE CONNECT ... FROM PUBLIC`
+closes the default-open door Postgres otherwise leaves for any authenticated role,
+confirmed necessary by testing, not assumed. Reached over a tunnel-only SSH login (no
+shell, no commands, port-forwarding only) rather than a public port. Full design and
+one-time setup in `deploy/CLAUDE.md`'s "Social share database" section.
+
 ---
 
 ## 6. Layer 1 — Derived assets

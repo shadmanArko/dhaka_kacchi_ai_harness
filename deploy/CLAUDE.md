@@ -74,6 +74,7 @@ This file is "how do I run it / change it."
     30 4 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-instagram >> /opt/dhaka-kacchi/logs/ingest-instagram.log 2>&1
     45 4 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-facebook >> /opt/dhaka-kacchi/logs/ingest-facebook.log 2>&1
     0 5 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-threads >> /opt/dhaka-kacchi/logs/ingest-threads.log 2>&1
+    30 5 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make refresh-social-share >> /opt/dhaka-kacchi/logs/refresh-social-share.log 2>&1
     15 6 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make run-detectors >> /opt/dhaka-kacchi/logs/detectors.log 2>&1
     ```
     The events job runs at :05, not :00 - offset from ingest-direct so the two
@@ -94,6 +95,12 @@ This file is "how do I run it / change it."
     (graph.threads.net) and its own quota, so it can't contend with the
     other two even if it did overlap - the stagger is mostly to keep their
     logs from interleaving.
+
+    `refresh-social-share` (ops/refresh_social_share.py, see this file's own
+    "Social share database" section) runs at 5:30am, after Threads lands
+    but before the detectors - same reasoning as the ingest jobs above:
+    reading `warehouse` before that day's posts have landed would ship a
+    stale mirror to the collaborator who reads it.
 
     `run-detectors` (ops/run_detectors.py) runs last, at 6:15am, after every
     ingest job for the day has had a chance to land - a detector reading
@@ -218,6 +225,133 @@ Then add `WAREHOUSE_COCKPIT_WRITER_PASSWORD` to `.env`, `docker compose up
 -d postgres`, and `docker compose up -d --build ordering-backend` to pick
 up `WAREHOUSE_COCKPIT_DATABASE_URL`. Same `openssl rand -hex 24` warning
 as above applies.
+
+## Social share database
+
+A separate Postgres database (`social_share`, own Postgres instance, own
+databases list alongside `ordering`/`warehouse`) holding one clean,
+read-only table — `social_post_metrics`, one row per organic Instagram/
+Facebook/Threads post plus its latest engagement metrics — decoupled from
+the live warehouse specifically so it can be handed to an outside
+collaborator. See `ops/refresh_social_share.py` for the refresh job and
+`warehouse/config.py`'s `SocialShareTargetSettings` for how it connects.
+
+**Why a separate database, not a narrower role on `warehouse`:** a leaked
+reader password or a sloppy query in this arrangement can only ever expose
+this one derived table — structurally, not by convention — never anything
+in the same database as real orders or customer data. The collaborator's
+Postgres role (`social_share_reader`) also cannot even *connect* to
+`ordering` or `warehouse` (see the `REVOKE CONNECT ... FROM PUBLIC` lines
+below — Postgres grants CONNECT to every role by default unless revoked,
+confirmed the hard way that this needed an explicit fix, not just relying
+on missing table grants).
+
+### One-time production setup
+
+1. Generate two passwords (`openssl rand -hex 24` — not `-base64`, see the
+   warning above) and add both to `.env`:
+   ```
+   SOCIAL_SHARE_WRITER_PASSWORD=...
+   SOCIAL_SHARE_READER_PASSWORD=...
+   ```
+2. Create the database, roles, and table:
+   ```bash
+   docker compose exec -T postgres psql -U postgres -c "
+     CREATE ROLE social_share_writer LOGIN PASSWORD '<SOCIAL_SHARE_WRITER_PASSWORD>';
+     CREATE ROLE social_share_reader LOGIN PASSWORD '<SOCIAL_SHARE_READER_PASSWORD>';
+     CREATE DATABASE social_share OWNER social_share_writer;
+     REVOKE CONNECT ON DATABASE ordering FROM PUBLIC;
+     REVOKE CONNECT ON DATABASE warehouse FROM PUBLIC;
+     REVOKE CONNECT ON DATABASE social_share FROM PUBLIC;
+   "
+   docker compose exec -T postgres psql -U postgres social_share -c "
+     CREATE TABLE social_post_metrics (
+       id uuid PRIMARY KEY,
+       platform text NOT NULL,
+       content_type text,
+       posted_at timestamptz NOT NULL,
+       caption text,
+       permalink text,
+       impressions bigint NOT NULL DEFAULT 0,
+       reach bigint NOT NULL DEFAULT 0,
+       likes bigint NOT NULL DEFAULT 0,
+       comments bigint NOT NULL DEFAULT 0,
+       shares bigint NOT NULL DEFAULT 0,
+       saves bigint NOT NULL DEFAULT 0,
+       clicks bigint NOT NULL DEFAULT 0,
+       refreshed_at timestamptz NOT NULL DEFAULT now()
+     );
+     ALTER TABLE social_post_metrics OWNER TO social_share_writer;
+     GRANT CONNECT ON DATABASE social_share TO social_share_reader;
+     GRANT USAGE ON SCHEMA public TO social_share_reader;
+     GRANT SELECT ON social_post_metrics TO social_share_reader;
+   "
+   ```
+   (This is exactly what `postgres-init/01-init-databases.sh` does on a
+   fresh volume — done by hand here because this only runs once,
+   automatically, against an *empty* volume, same situation as
+   `warehouse_reader`/`warehouse_cockpit_writer` above.)
+3. `docker compose up -d postgres` to pick up the two new env vars, then
+   run the refresh job once by hand to populate the table and confirm it
+   works before trusting cron with it:
+   ```bash
+   docker compose run --rm warehouse make refresh-social-share
+   ```
+4. Add the cron entry — after the ingest jobs land fresh data, before
+   `run-detectors`:
+   ```
+   30 5 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make refresh-social-share >> /opt/dhaka-kacchi/logs/refresh-social-share.log 2>&1
+   ```
+
+### Giving the collaborator a way in
+
+The Postgres port is loopback-only (`127.0.0.1:5432`, see docker-compose.yml)
+— nothing external reaches it today, by design. Rather than opening a public
+port, this adds one more restricted SSH login whose ONLY capability is
+local port-forwarding — no shell, no files, no commands. Two independent
+secrets are needed to reach the data (this SSH key, plus the
+`social_share_reader` password) — either alone is useless.
+
+1. On the VPS:
+   ```bash
+   sudo useradd -m -s /usr/sbin/nologin datashare
+   sudo mkdir -p /home/datashare/.ssh
+   sudo chmod 700 /home/datashare/.ssh
+   sudo chown -R datashare:datashare /home/datashare/.ssh
+   ```
+2. Have the collaborator generate their OWN keypair on their own machine
+   (`ssh-keygen -t ed25519 -C "social-share"`) and send back only the
+   **public** key — the private key should never travel through anyone
+   else, including you or me.
+3. Add it to `/home/datashare/.ssh/authorized_keys`, with the restriction
+   prefix (note: this is the *inverse* of the CI/CD deploy key above — that
+   one allows a fixed command and blocks port-forwarding; this one allows
+   ONLY port-forwarding and blocks everything else):
+   ```
+   restrict,port-forwarding ssh-ed25519 AAAA... social-share
+   ```
+   `sudo chmod 600 /home/datashare/.ssh/authorized_keys` afterward.
+4. Give the collaborator this recipe (their side, no VPS access needed
+   beyond the tunnel):
+   ```bash
+   ssh -N -L 5433:localhost:5432 datashare@<vps-host>
+   ```
+   then point any Postgres client (DBeaver, pgAdmin, psql, pandas via
+   SQLAlchemy) at:
+   ```
+   postgresql://social_share_reader:<SOCIAL_SHARE_READER_PASSWORD>@localhost:5433/social_share
+   ```
+   The tunnel needs to stay running (a second terminal, or `-f` to
+   background it) while they query.
+
+### Revoking access later
+
+Two independent things to pull, either one is sufficient on its own:
+- Remove their line from `/home/datashare/.ssh/authorized_keys` (or
+  `sudo userdel -r datashare` to remove the whole account).
+- Rotate `SOCIAL_SHARE_READER_PASSWORD` (`ALTER ROLE social_share_reader
+  WITH PASSWORD '...'`, then update `.env`, `docker compose up -d
+  postgres`).
 
 ## CI/CD
 

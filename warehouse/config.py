@@ -294,6 +294,55 @@ def load_threads_source_settings(
     return ThreadsSourceSettings(access_token=access_token, user_id=user_id)
 
 
+@dataclass(frozen=True, slots=True)
+class SocialShareTargetSettings:
+    """Config for writing into `social_share` - a SEPARATE Postgres database
+    (not a schema inside `warehouse`) holding a decoupled, read-only copy of
+    organic social post performance data, handed to an outside collaborator
+    over a tunnel-only SSH login + the social_share_reader role (see
+    deploy/CLAUDE.md's "Social share database" section).
+
+    Deliberately its own database, not just a narrower role on `warehouse`:
+    a query bug or a leaked reader password only ever exposes this one
+    derived table, never anything in the same database as real order/
+    customer data - the isolation is structural, not just a grant.
+
+    Loaded separately from Settings for the same reason as
+    OrderingSourceSettings: only ops/refresh_social_share.py needs this
+    connection string, so requiring it would needlessly break every other
+    entrypoint (migrations, verify, gate, the ingest jobs) that has nothing
+    to do with this database.
+    """
+
+    sqlalchemy_url: URL
+
+
+def load_social_share_target_settings(
+    environ: Mapping[str, str] | None = None,
+) -> SocialShareTargetSettings:
+    """Fail-fast config for ops/refresh_social_share.py. Same idiom as
+    load_ordering_source_settings(): validate eagerly, raise ConfigError
+    with an actionable message, never return a partially-valid object.
+    """
+    if environ is None:
+        load_dotenv(ENV_FILE, override=False)
+        environ = os.environ
+
+    raw = (environ.get("SOCIAL_SHARE_DATABASE_URL") or "").strip()
+    if not raw:
+        raise ConfigError(
+            "SOCIAL_SHARE_DATABASE_URL is required and has no default.\n"
+            "  Set it in the process environment, or add it to "
+            f"{ENV_FILE} (see .env.example). Must connect as the "
+            "social_share_writer role, to the social_share database - "
+            "see deploy/CLAUDE.md's 'Social share database' section for "
+            "how that role/database are created."
+        )
+
+    url = _validate_postgres_url(raw, var_name="SOCIAL_SHARE_DATABASE_URL")
+    return SocialShareTargetSettings(sqlalchemy_url=url.set(drivername=_DRIVER))
+
+
 def _main(argv: list[str]) -> int:
     """`python -m warehouse.config [print-url]` - used by `make psql`."""
     try:

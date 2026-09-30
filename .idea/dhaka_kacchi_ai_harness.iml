@@ -3,6 +3,8 @@
   <component name="NewModuleRootManager">
     <content url="file://$MODULE_DIR$">
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/ml/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/predictor/.venv" />
     </content>
     <orderEntry type="jdk" jdkName="uv (dhaka_kacchi_ai_harness)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />

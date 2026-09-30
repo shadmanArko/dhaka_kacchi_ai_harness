@@ -1,7 +1,9 @@
 # VPS Docker Compose stack for Dhaka Kacchi's backend + database. One
-# Postgres instance with two databases (see postgres-init/01-init-databases.sh),
-# the ordering backend, the warehouse (never auto-started - see its
-# `profiles` below), and Caddy for automatic HTTPS.
+# Postgres instance with three databases (see postgres-init/01-init-databases.sh:
+# ordering, warehouse, and social_share - a decoupled data-sharing database,
+# see deploy/CLAUDE.md's "Social share database" section), the ordering
+# backend, the warehouse (never auto-started - see its `profiles` below),
+# and Caddy for automatic HTTPS.
 #
 # See CLAUDE.md in this directory for how to run and maintain this stack,
 # and ARCHITECTURE.md for why it's shaped this way.
@@ -25,6 +27,8 @@ services:
       ORDERING_READER_PASSWORD: ${ORDERING_READER_PASSWORD:?set in .env}
       WAREHOUSE_READER_PASSWORD: ${WAREHOUSE_READER_PASSWORD:?set in .env}
       WAREHOUSE_COCKPIT_WRITER_PASSWORD: ${WAREHOUSE_COCKPIT_WRITER_PASSWORD:?set in .env}
+      SOCIAL_SHARE_WRITER_PASSWORD: ${SOCIAL_SHARE_WRITER_PASSWORD:?set in .env}
+      SOCIAL_SHARE_READER_PASSWORD: ${SOCIAL_SHARE_READER_PASSWORD:?set in .env}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       # Only read on first init against an EMPTY data volume - the official
@@ -105,6 +109,11 @@ services:
     environment:
       DATABASE_URL: postgresql://warehouse_app:${WAREHOUSE_APP_PASSWORD}@postgres:5432/warehouse?sslmode=disable
       ORDERING_DATABASE_URL: postgresql://ordering_reader:${ORDERING_READER_PASSWORD}@postgres:5432/ordering?sslmode=disable
+      # ops/refresh_social_share.py only - writes into the separate
+      # social_share database, never `warehouse`. See postgres-init/
+      # 01-init-databases.sh and deploy/CLAUDE.md's "Social share database"
+      # section.
+      SOCIAL_SHARE_DATABASE_URL: postgresql://social_share_writer:${SOCIAL_SHARE_WRITER_PASSWORD}@postgres:5432/social_share?sslmode=disable
     depends_on:
       postgres:
         condition: service_healthy
