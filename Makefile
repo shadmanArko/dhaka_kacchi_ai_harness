@@ -15,7 +15,7 @@ SEED_REV    := 0012
         verify-ingest-events ingest-instagram ingest-instagram-dry-run \
         ingest-facebook ingest-facebook-dry-run \
         ingest-threads ingest-threads-dry-run \
-        run-detectors \
+        run-detectors refresh-social-share \
         current history sql psql revision lint fmt
 
 help:  ## show this help
@@ -115,6 +115,9 @@ ingest-threads-dry-run:  ## show what ingest-threads would write, without writin
 
 run-detectors:  ## run every ops detector, opening/resolving cockpit_alert rows (see ops/run_detectors.py)
 	$(PY) -m ops.run_detectors
+
+refresh-social-share:  ## mirror social post performance data into the social_share database (needs SOCIAL_SHARE_DATABASE_URL - see ops/refresh_social_share.py)
+	$(PY) -m ops.refresh_social_share
 
 current:  ## which revision is applied
 	$(ALEMBIC) current --verbose

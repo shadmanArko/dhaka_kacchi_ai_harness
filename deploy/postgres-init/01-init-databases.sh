@@ -35,6 +35,18 @@
 #                              WHERE-clause columns to evaluate the filter,
 #                              which UPDATE alone does not grant (learned the
 #                              hard way - see git log around 2026-09-23).
+#   social_share_writer      - INSERT/UPDATE/DELETE (via TRUNCATE) on
+#                              `social_share.social_post_metrics` only, used
+#                              ONLY by ops/refresh_social_share.py.
+#   social_share_reader      - SELECT-only on that same table, in that same
+#                              database - the ONLY credential ever handed to
+#                              an outside collaborator (see deploy/CLAUDE.md's
+#                              "Social share database" section). A SEPARATE
+#                              database from `warehouse`, not just a
+#                              narrower role inside it: a leaked reader
+#                              password or a sloppy query can only ever see
+#                              this one derived table, never anything in the
+#                              same database as real order/customer data.
 #
 # This script CANNOT grant SELECT/UPDATE ON cockpit_alert here - the table
 # doesn't exist yet at first-init time (this repo's own `alembic upgrade
@@ -51,6 +63,8 @@ set -euo pipefail
 : "${ORDERING_READER_PASSWORD:?ORDERING_READER_PASSWORD must be set}"
 : "${WAREHOUSE_READER_PASSWORD:?WAREHOUSE_READER_PASSWORD must be set}"
 : "${WAREHOUSE_COCKPIT_WRITER_PASSWORD:?WAREHOUSE_COCKPIT_WRITER_PASSWORD must be set}"
+: "${SOCIAL_SHARE_WRITER_PASSWORD:?SOCIAL_SHARE_WRITER_PASSWORD must be set}"
+: "${SOCIAL_SHARE_READER_PASSWORD:?SOCIAL_SHARE_READER_PASSWORD must be set}"
 
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
     CREATE ROLE ordering_app LOGIN PASSWORD '$ORDERING_APP_PASSWORD';
@@ -58,9 +72,24 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-E
     CREATE ROLE ordering_reader LOGIN PASSWORD '$ORDERING_READER_PASSWORD';
     CREATE ROLE warehouse_reader LOGIN PASSWORD '$WAREHOUSE_READER_PASSWORD';
     CREATE ROLE warehouse_cockpit_writer LOGIN PASSWORD '$WAREHOUSE_COCKPIT_WRITER_PASSWORD';
+    CREATE ROLE social_share_writer LOGIN PASSWORD '$SOCIAL_SHARE_WRITER_PASSWORD';
+    CREATE ROLE social_share_reader LOGIN PASSWORD '$SOCIAL_SHARE_READER_PASSWORD';
 
     CREATE DATABASE ordering OWNER ordering_app;
     CREATE DATABASE warehouse OWNER warehouse_app;
+    CREATE DATABASE social_share OWNER social_share_writer;
+
+    -- Postgres grants CONNECT on every database to PUBLIC by default - so
+    -- without this, ANY role with valid login credentials (including
+    -- social_share_reader) could open a connection to `ordering` or
+    -- `warehouse` and enumerate table names via information_schema, even
+    -- with no table-level SELECT grant there. Every role that legitimately
+    -- needs to connect already has an EXPLICIT GRANT CONNECT below (or owns
+    -- the database outright, which bypasses this entirely) - confirmed
+    -- these revokes don't break anything before adding them.
+    REVOKE CONNECT ON DATABASE ordering FROM PUBLIC;
+    REVOKE CONNECT ON DATABASE warehouse FROM PUBLIC;
+    REVOKE CONNECT ON DATABASE social_share FROM PUBLIC;
 EOSQL
 
 # ordering_reader's read access is granted inside `ordering` itself, not at
@@ -97,4 +126,41 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "warehouse" <<-EOSQ
     -- deploy/CLAUDE.md.
     GRANT CONNECT ON DATABASE warehouse TO warehouse_cockpit_writer;
     GRANT USAGE ON SCHEMA public TO warehouse_cockpit_writer;
+EOSQL
+
+# social_share is a genuinely separate database (not a schema in
+# `warehouse`), owned by social_share_writer, so the table can be created
+# right here at first-init time - unlike cockpit_alert above, nothing here
+# depends on a migration this repo runs later. See ops/refresh_social_share.py
+# for what writes into it and deploy/CLAUDE.md's "Social share database"
+# section for the full design.
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "social_share" <<-EOSQL
+    CREATE TABLE social_post_metrics (
+        id uuid PRIMARY KEY,
+        platform text NOT NULL,
+        content_type text,
+        posted_at timestamptz NOT NULL,
+        caption text,
+        permalink text,
+        impressions bigint NOT NULL DEFAULT 0,
+        reach bigint NOT NULL DEFAULT 0,
+        likes bigint NOT NULL DEFAULT 0,
+        comments bigint NOT NULL DEFAULT 0,
+        shares bigint NOT NULL DEFAULT 0,
+        saves bigint NOT NULL DEFAULT 0,
+        clicks bigint NOT NULL DEFAULT 0,
+        refreshed_at timestamptz NOT NULL DEFAULT now()
+    );
+
+    -- Created as $POSTGRES_USER (the init script's connecting role) above,
+    -- so ownership must be handed to social_share_writer explicitly - unlike
+    -- ordering_app/warehouse_app, which own their tables automatically
+    -- because THEY run the migration that creates them, this table is
+    -- created directly by this script instead. Without this, TRUNCATE in
+    -- ops/refresh_social_share.py fails with "permission denied".
+    ALTER TABLE social_post_metrics OWNER TO social_share_writer;
+
+    GRANT CONNECT ON DATABASE social_share TO social_share_reader;
+    GRANT USAGE ON SCHEMA public TO social_share_reader;
+    GRANT SELECT ON social_post_metrics TO social_share_reader;
 EOSQL
