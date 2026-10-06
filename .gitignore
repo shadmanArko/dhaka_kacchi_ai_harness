@@ -12,3 +12,6 @@ ml/*/artifacts/*.csv
 # ML pipeline: isolated venv for ml/ work, kept separate from the warehouse's own deps
 ml/.venv/
 ml/03-modeling/artifacts/cv_predictions.csv
+
+# RAG pipeline: raw source exports pulled from social_share (real captions, not synthetic)
+rag/data/*.csv

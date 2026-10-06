@@ -8,6 +8,15 @@ dependencies = [
     "sqlalchemy>=2.0.52,<2.1",
     "psycopg[binary]>=3.3,<4",
     "python-dotenv>=1.2,<2",
+    # rag/ subsystem: pgvector client, local embeddings (sentence-transformers),
+    # file loaders (pypdf/bs4/fonttools), and the retrieval web UI (fastapi/uvicorn).
+    "beautifulsoup4>=4.15.0",
+    "fastapi>=0.142.2",
+    "fonttools>=4.66.1",
+    "pgvector>=0.5.0",
+    "pypdf>=6.19.0",
+    "sentence-transformers>=6.1.0",
+    "uvicorn[standard]>=0.54.0",
 ]
 
 [dependency-groups]
