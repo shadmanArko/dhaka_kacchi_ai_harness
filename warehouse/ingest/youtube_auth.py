@@ -93,7 +93,7 @@ class Grant:
     scopes: tuple[str, ...]
 
 
-def _require_https_or_local(url: str, label: str) -> None:
+def require_https_or_local(url: str, label: str) -> None:
     """The client secret and tokens travel to these URLs, so plain http is only
     acceptable to a loopback address (which is what the verify script uses)."""
     parts = urllib.parse.urlsplit(url)
@@ -201,7 +201,7 @@ def exchange_code(
     *,
     token_url: str = TOKEN_URL,
 ) -> Grant:
-    _require_https_or_local(token_url, "token URL")
+    require_https_or_local(token_url, "token URL")
     data = urllib.parse.urlencode(
         {
             "client_id": settings.client_id,
@@ -257,8 +257,8 @@ def authorize(
     timeout: float = WAIT_SECONDS,
     out: Callable[[str], None] = print,
 ) -> Grant:
-    _require_https_or_local(auth_url, "authorization URL")
-    _require_https_or_local(token_url, "token URL")
+    require_https_or_local(auth_url, "authorization URL")
+    require_https_or_local(token_url, "token URL")
 
     verifier, challenge = pkce_pair()
     state = secrets.token_urlsafe(24)
@@ -348,7 +348,7 @@ def probe_analytics(access_token: str, *, reports_url: str = REPORTS_URL) -> str
     raises: a failed probe must not make a successful token mint look failed -
     but it distinguishes the two causes people confuse (API not enabled vs a
     permission problem)."""
-    _require_https_or_local(reports_url, "reports URL")
+    require_https_or_local(reports_url, "reports URL")
     end = date.today() - timedelta(days=3)  # Analytics data lags 2-3 days
     query = urllib.parse.urlencode(
         {
@@ -383,7 +383,7 @@ def probe_analytics(access_token: str, *, reports_url: str = REPORTS_URL) -> str
 
 def refresh_access_token(settings: YouTubeOAuthSettings, *, token_url: str = TOKEN_URL) -> str:
     """Exchange the saved refresh token for a short-lived access token."""
-    _require_https_or_local(token_url, "token URL")
+    require_https_or_local(token_url, "token URL")
     assert settings.refresh_token  # the caller loaded settings with the token required
     data = urllib.parse.urlencode(
         {
