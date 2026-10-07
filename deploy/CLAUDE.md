@@ -95,12 +95,19 @@ This file is "how do I run it / change it."
     inside the same hour is still labelled correctly: the job also fills in
     attribution for earlier events that have none, and never changes one that
     has it.) **ONE-TIME STEP before the first run: the website's production
-    database needs its new table.** From the website repo, as for the other
-    manual migrations:
+    database needs its new table.** It must exist BEFORE the website deploys,
+    which is before the server has pulled the website repo, so the file
+    `dhaka-kacchi-connect/worker/migrations-manual/0004_tracked_links.sql` is not
+    on the server yet: paste its contents instead. From
+    `/opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy`, run
+    `docker compose exec -T postgres psql -U postgres ordering` with that SQL on
+    stdin (a `<<'EOF'` heredoc), or after the pull:
     ```bash
     docker compose exec -T postgres psql -U postgres ordering \
-      < worker/migrations-manual/0004_tracked_links.sql
+      < ../../dhaka-kacchi-connect/worker/migrations-manual/0004_tracked_links.sql
     ```
+    Check it with `\dp tracked_links`: `ordering_app` should hold `arw` and
+    `ordering_reader` `r`.
     Apply it BEFORE deploying the website worker that serves the Link builder
     (the page errors until the table exists), and before this cron line is
     added (the job says so and exits 3 if the table is missing). It needs no new
