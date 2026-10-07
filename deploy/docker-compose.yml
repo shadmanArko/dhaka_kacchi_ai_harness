@@ -70,7 +70,13 @@ services:
       # ml/05-production in this repo) - reached over the docker network only,
       # never exposed publicly. See dhaka-kacchi-connect's own admin route
       # that proxies to this.
-      PREDICTOR_URL: http://predictor:8000
+      # Overridable from deploy/.env: PREDICTOR_URL=http://intel-api:8000 points
+      # the admin post-predict page at the dk-intelligence service (same
+      # /v1/predict contract; serves whichever model the owner approved in
+      # Telegram). Remove that line + `docker compose up -d ordering-backend`
+      # to switch back. The predictor service below keeps running either way:
+      # dk-intelligence scores every post with it too, for live comparison.
+      PREDICTOR_URL: ${PREDICTOR_URL:-http://predictor:8000}
     depends_on:
       postgres:
         condition: service_healthy

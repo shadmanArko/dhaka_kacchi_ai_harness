@@ -235,6 +235,7 @@ Run these from `deploy/` on the VPS.
 | View logs | `docker compose logs -f ordering-backend` |
 | Restart the ordering backend after a code change | `docker compose up -d --build ordering-backend` |
 | Restart the post-engagement predictor after retraining (`ml/05-production/build_artifact.py`) or a code change | `docker compose up -d --build predictor` |
+| Point the admin post-predict page at dk-intelligence (approved models) / back | add `PREDICTOR_URL=http://intel-api:8000` to `.env` (or remove it), then `docker compose up -d ordering-backend` |
 | Run a warehouse command | `docker compose run --rm warehouse <command>`, e.g. `make gate` |
 | Apply a new warehouse migration | `docker compose run --rm warehouse uv run alembic upgrade head` |
 | Apply a new ordering-backend schema change | `docker compose run --rm ordering-backend npm run db:migrate` (see the DROP TABLE warning in that repo's `worker/CLAUDE.md` first) |
