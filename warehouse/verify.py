@@ -49,6 +49,10 @@ EXPECTED_TABLES = frozenset(
         "raw_social_posts_facebook",
         "raw_social_posts_threads",
         "raw_social_posts_youtube",
+        "raw_youtube_analytics",
+        "social_account_daily",
+        "social_post_daily",
+        "social_traffic_source_daily",
     }
 )
 

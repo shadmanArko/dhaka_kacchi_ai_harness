@@ -75,6 +75,7 @@ This file is "how do I run it / change it."
     45 4 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-facebook >> /opt/dhaka-kacchi/logs/ingest-facebook.log 2>&1
     0 5 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-threads >> /opt/dhaka-kacchi/logs/ingest-threads.log 2>&1
     15 5 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-youtube >> /opt/dhaka-kacchi/logs/ingest-youtube.log 2>&1
+    20 5 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-youtube-analytics >> /opt/dhaka-kacchi/logs/ingest-youtube-analytics.log 2>&1
     30 5 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make refresh-social-share >> /opt/dhaka-kacchi/logs/refresh-social-share.log 2>&1
     15 6 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make run-detectors >> /opt/dhaka-kacchi/logs/detectors.log 2>&1
     ```
@@ -107,6 +108,20 @@ This file is "how do I run it / change it."
     rows are deliberately NOT mirrored into `social_share` - that job has an
     explicit platform allowlist (`SHARED_PLATFORMS` in ops/refresh_social_share.py),
     so sharing YouTube with the collaborator is a decision, not a side effect.
+
+    `ingest-youtube-analytics` runs at 5:20am, after `ingest-youtube` has made
+    sure every video exists as a `social_post` (it asks YouTube about the videos
+    already in the warehouse). It is a SEPARATE job on purpose: a revoked token
+    or a disabled Analytics API then fails this one loudly without taking the
+    public-stats job down with it. Its tables behave differently from the
+    snapshot tables above - each day's figure is RESTATED for ~3 days, and the
+    newest ~3 days are simply absent - so every run re-pulls a trailing 14-day
+    window and overwrites, and a day that is missing today is filled in by a
+    later run rather than stored as zero. Needs the three `YOUTUBE_OAUTH_*`
+    values in this directory's `.env`, with a READ-ONLY refresh token minted by
+    `make youtube-auth` on your own machine (never a token that can upload or
+    delete). To backfill after the first run, from `deploy/`:
+    `docker compose run --rm warehouse uv run python -m warehouse.ingest.youtube_analytics --since 2026-09-01`.
 
     WHAT DEPLOY DOES AND DOES NOT DO FOR A NEW SOURCE: pushing to `main`
     makes deploy.sh pull the code, apply every pending warehouse migration

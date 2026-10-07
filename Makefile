@@ -16,6 +16,9 @@ SEED_REV    := 0012
         ingest-facebook ingest-facebook-dry-run \
         ingest-threads ingest-threads-dry-run \
         ingest-youtube ingest-youtube-dry-run verify-ingest-youtube \
+        youtube-auth youtube-auth-check verify-youtube-auth \
+        ingest-youtube-analytics ingest-youtube-analytics-dry-run \
+        verify-ingest-youtube-analytics \
         run-detectors refresh-social-share \
         current history sql psql revision lint fmt
 
@@ -122,6 +125,24 @@ ingest-youtube-dry-run:  ## show what ingest-youtube would write, without writin
 
 verify-ingest-youtube:  ## prove ingest-youtube against a local fake YouTube API and a throwaway database (needs no YouTube account; never touches your dev data)
 	$(PY) -m warehouse.ingest.youtube_verify
+
+youtube-auth:  ## one-time browser consent: mint a READ-ONLY YouTube Analytics token and save it to .env (see warehouse/ingest/youtube_auth.py)
+	$(PY) -m warehouse.ingest.youtube_auth
+
+youtube-auth-check:  ## test the saved YouTube Analytics token against the API, without minting a new one
+	$(PY) -m warehouse.ingest.youtube_auth --check
+
+verify-youtube-auth:  ## prove the OAuth helper against a local fake Google (needs no account and no database)
+	$(PY) -m warehouse.ingest.youtube_auth_verify
+
+ingest-youtube-analytics:  ## pull YouTube watch time, subscribers, daily totals and traffic sources (needs the OAuth token - run `make youtube-auth` once)
+	$(PY) -m warehouse.ingest.youtube_analytics
+
+ingest-youtube-analytics-dry-run:  ## show what ingest-youtube-analytics would write, without writing
+	$(PY) -m warehouse.ingest.youtube_analytics --dry-run
+
+verify-ingest-youtube-analytics:  ## prove ingest-youtube-analytics against a fake Analytics API and a throwaway database
+	$(PY) -m warehouse.ingest.youtube_analytics_verify
 
 run-detectors:  ## run every ops detector, opening/resolving cockpit_alert rows (see ops/run_detectors.py)
 	$(PY) -m ops.run_detectors
