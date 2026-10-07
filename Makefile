@@ -21,6 +21,7 @@ SEED_REV    := 0012
         verify-ingest-youtube-analytics \
         ingest-posthog ingest-posthog-dry-run build-web-aggregates verify-ingest-posthog \
         ingest-search-console ingest-search-console-dry-run verify-ingest-search-console \
+        ingest-social-followers ingest-social-followers-dry-run verify-ingest-social-followers \
         run-detectors refresh-social-share \
         current history sql psql revision lint fmt
 
@@ -145,6 +146,15 @@ ingest-youtube-analytics-dry-run:  ## show what ingest-youtube-analytics would w
 
 verify-ingest-youtube-analytics:  ## prove ingest-youtube-analytics against a fake Analytics API and a throwaway database
 	$(PY) -m warehouse.ingest.youtube_analytics_verify
+
+ingest-social-followers:  ## record today's follower/subscriber counts for Instagram, Facebook, Threads and YouTube (uses the existing credentials; history cannot be backfilled)
+	$(PY) -m warehouse.ingest.social_followers
+
+ingest-social-followers-dry-run:  ## read the four follower counts and print them, write nothing
+	$(PY) -m warehouse.ingest.social_followers --dry-run
+
+verify-ingest-social-followers:  ## prove ingest-social-followers against a local fake of all four APIs and a throwaway database
+	$(PY) -m warehouse.ingest.social_followers_verify
 
 ingest-posthog:  ## pull the website's PostHog events (scrubbed: hashed ids, no tokens/locations) and rebuild the daily web summaries (needs POSTHOG_* in .env)
 	$(PY) -m warehouse.ingest.posthog_web

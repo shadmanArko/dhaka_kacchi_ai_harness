@@ -78,6 +78,7 @@ This file is "how do I run it / change it."
     20 5 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-youtube-analytics >> /opt/dhaka-kacchi/logs/ingest-youtube-analytics.log 2>&1
     25 5 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-posthog >> /opt/dhaka-kacchi/logs/ingest-posthog.log 2>&1
     30 5 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-search-console >> /opt/dhaka-kacchi/logs/ingest-search-console.log 2>&1
+    40 5 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-social-followers >> /opt/dhaka-kacchi/logs/ingest-social-followers.log 2>&1
     30 5 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make refresh-social-share >> /opt/dhaka-kacchi/logs/refresh-social-share.log 2>&1
     15 6 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make run-detectors >> /opt/dhaka-kacchi/logs/detectors.log 2>&1
     ```
@@ -160,6 +161,15 @@ This file is "how do I run it / change it."
     The page and query tables omit rows too small or anonymized to publish (on the
     real property, 32% of impressions and 17% of clicks survive there), so they say
     WHICH pages and searches, never HOW MANY.
+
+    `ingest-social-followers` runs at 5:40am. One tiny call each to Instagram,
+    Facebook, Threads and YouTube for today's follower / subscriber count, using the
+    credentials those four jobs already hold - nothing new to configure. THIS HISTORY
+    CANNOT BE BACKFILLED (no API says what the count was last week), so a day the job
+    did not run is a permanent gap; check its log if a morning is ever missed. Each
+    platform is stored on its own: an expired Threads token exits 3 in the log but
+    does not cost the other three counts. YouTube's count is NULL if the channel hides
+    its subscribers, and is rounded by YouTube above 1,000.
 
     WHAT DEPLOY DOES AND DOES NOT DO FOR A NEW SOURCE: pushing to `main`
     makes deploy.sh pull the code, apply every pending warehouse migration
