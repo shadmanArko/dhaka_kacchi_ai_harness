@@ -53,6 +53,11 @@ EXPECTED_TABLES = frozenset(
         "social_account_daily",
         "social_post_daily",
         "social_traffic_source_daily",
+        "raw_posthog_events",
+        "web_traffic_daily",
+        "web_page_daily",
+        "web_acquisition_daily",
+        "web_event_daily",
     }
 )
 

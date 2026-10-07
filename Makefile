@@ -19,6 +19,7 @@ SEED_REV    := 0012
         youtube-auth youtube-auth-check verify-youtube-auth \
         ingest-youtube-analytics ingest-youtube-analytics-dry-run \
         verify-ingest-youtube-analytics \
+        ingest-posthog ingest-posthog-dry-run build-web-aggregates verify-ingest-posthog \
         run-detectors refresh-social-share \
         current history sql psql revision lint fmt
 
@@ -143,6 +144,18 @@ ingest-youtube-analytics-dry-run:  ## show what ingest-youtube-analytics would w
 
 verify-ingest-youtube-analytics:  ## prove ingest-youtube-analytics against a fake Analytics API and a throwaway database
 	$(PY) -m warehouse.ingest.youtube_analytics_verify
+
+ingest-posthog:  ## pull the website's PostHog events (scrubbed: hashed ids, no tokens/locations) and rebuild the daily web summaries (needs POSTHOG_* in .env)
+	$(PY) -m warehouse.ingest.posthog_web
+
+ingest-posthog-dry-run:  ## pull and scrub PostHog events, print what would be kept and dropped, write nothing
+	$(PY) -m warehouse.ingest.posthog_web --dry-run
+
+build-web-aggregates:  ## rebuild the daily web summaries from raw events already stored (needs no PostHog access)
+	$(PY) -m warehouse.ingest.posthog_web --build-only
+
+verify-ingest-posthog:  ## prove the PostHog ingester and its privacy scrubbing against a fake PostHog and a throwaway database
+	$(PY) -m warehouse.ingest.posthog_verify
 
 run-detectors:  ## run every ops detector, opening/resolving cockpit_alert rows (see ops/run_detectors.py)
 	$(PY) -m ops.run_detectors
