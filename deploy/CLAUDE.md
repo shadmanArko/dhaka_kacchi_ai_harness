@@ -76,6 +76,7 @@ This file is "how do I run it / change it."
     0 5 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-threads >> /opt/dhaka-kacchi/logs/ingest-threads.log 2>&1
     15 5 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-youtube >> /opt/dhaka-kacchi/logs/ingest-youtube.log 2>&1
     20 5 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-youtube-analytics >> /opt/dhaka-kacchi/logs/ingest-youtube-analytics.log 2>&1
+    25 5 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-posthog >> /opt/dhaka-kacchi/logs/ingest-posthog.log 2>&1
     30 5 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make refresh-social-share >> /opt/dhaka-kacchi/logs/refresh-social-share.log 2>&1
     15 6 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make run-detectors >> /opt/dhaka-kacchi/logs/detectors.log 2>&1
     ```
@@ -122,6 +123,26 @@ This file is "how do I run it / change it."
     `make youtube-auth` on your own machine (never a token that can upload or
     delete). To backfill after the first run, from `deploy/`:
     `docker compose run --rm warehouse uv run python -m warehouse.ingest.youtube_analytics --since 2026-09-01`.
+
+    `ingest-posthog` runs at 5:25am. It pulls the site's PostHog events, SCRUBS
+    them (posthog_sanitize.py: an allowlist of reviewed fields, visitor and
+    customer ids replaced by keyed hashes, URLs cut to their utm_* parameters,
+    location cut to country/region, the owner's /admin traffic excluded) and
+    only then writes them, then rebuilds the last 14 days of the four
+    `web_*_daily` summary tables. Raw events are deleted after 13 months; the
+    summaries are kept. It needs four values in this directory's `.env`:
+    POSTHOG_HOST, POSTHOG_PROJECT_ID, POSTHOG_PERSONAL_API_KEY (read scope
+    'query' only) and POSTHOG_PSEUDONYM_SALT. THE SALT IS THE ONE THING HERE
+    THAT CANNOT BE RECOVERED: it must match the value on the owner's laptop and
+    be backed up somewhere safe, because changing or losing it makes new rows
+    stop matching old rows for the same visitor, and it is as sensitive as a
+    password (anyone holding it can recompute the pseudonym of a known customer
+    id). The job FAILS CLOSED: if a scrubbed event still looks sensitive (a
+    customer id, a token in a URL, an email, a PostHog key) the run stops and
+    stores nothing, and the log says which kind of value and which event.
+    Read the log for "properties nobody has reviewed" now and then: it lists
+    fields PostHog sent that the allowlist dropped, each of which is either
+    harmless (add it to ALLOWED) or a leak that was caught.
 
     WHAT DEPLOY DOES AND DOES NOT DO FOR A NEW SOURCE: pushing to `main`
     makes deploy.sh pull the code, apply every pending warehouse migration

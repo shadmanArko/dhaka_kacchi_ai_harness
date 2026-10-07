@@ -423,6 +423,95 @@ def load_youtube_oauth_settings(
     )
 
 
+POSTHOG_HOST_DEFAULT = "https://eu.posthog.com"
+
+
+@dataclass(frozen=True, slots=True)
+class PostHogSourceSettings:
+    """Config for reading web-analytics events out of PostHog (see
+    warehouse/ingest/posthog_web.py).
+
+    Two hosts exist and are easy to confuse. The SITE sends events to the
+    INGESTION host (eu.i.posthog.com, VITE_POSTHOG_HOST in the frontend). This job
+    READS from the QUERY host (eu.posthog.com). Pointing at the ingestion host
+    gives an unhelpful 404, so it is rejected here with an explanation.
+
+    `salt` keys the hash that replaces every visitor and customer id. It cannot be
+    recovered from the stored data, and CHANGING it later makes new rows stop
+    matching old rows for the same person - which is why it is validated here and
+    never given a default.
+    """
+
+    host: str
+    project_id: str
+    api_key: str
+    salt: str
+
+
+def load_posthog_source_settings(
+    environ: Mapping[str, str] | None = None,
+) -> PostHogSourceSettings:
+    """Fail-fast config for warehouse/ingest/posthog_web.py."""
+    if environ is None:
+        load_dotenv(ENV_FILE, override=False)
+        environ = os.environ
+
+    def need(name: str, hint: str = "") -> str:
+        value = (environ.get(name) or "").strip()
+        if not value:
+            raise ConfigError(
+                f"{name} is required and has no default.\n"
+                f"  Set it in the process environment, or add it to {ENV_FILE} "
+                f"(see .env.example). {hint}".rstrip()
+            )
+        return value
+
+    host = (environ.get("POSTHOG_HOST") or POSTHOG_HOST_DEFAULT).strip().rstrip("/")
+    parts = urlsplit(host)
+    if parts.scheme != "https" and not (parts.scheme == "http" and parts.hostname in _LOCAL_HOSTS):
+        raise ConfigError(
+            f"POSTHOG_HOST {host!r} must be https (the API key travels in a header). Plain "
+            "http is only accepted for localhost, which is what the verify script uses."
+        )
+    if (parts.hostname or "").endswith(".i.posthog.com"):
+        raise ConfigError(
+            f"POSTHOG_HOST {host!r} is the INGESTION host the website sends events to. "
+            "Reading uses the query host: https://eu.posthog.com (or https://us.posthog.com)."
+        )
+
+    project_id = need("POSTHOG_PROJECT_ID", "It is the number in your PostHog URL after /project/.")
+    if not project_id.isdigit():
+        raise ConfigError(f"POSTHOG_PROJECT_ID {project_id!r} must be the numeric project id.")
+
+    api_key = need(
+        "POSTHOG_PERSONAL_API_KEY",
+        "Create one in PostHog -> your profile -> Personal API keys, with only the read "
+        "scope 'query'.",
+    )
+    if api_key.startswith("phc_"):
+        raise ConfigError(
+            "POSTHOG_PERSONAL_API_KEY holds a 'phc_' token. That is the PUBLIC project token "
+            "the website embeds - it can only send events. A personal API key starts 'phx_'."
+        )
+    if not api_key.startswith("phx_"):
+        raise ConfigError(
+            "POSTHOG_PERSONAL_API_KEY does not look like a personal API key ('phx_...')."
+        )
+
+    salt = need(
+        "POSTHOG_PSEUDONYM_SALT",
+        "Generate one with `openssl rand -hex 32` and keep a copy somewhere safe: "
+        "changing it later breaks the link between old and new rows for the same visitor.",
+    )
+    if len(salt) < 32 or len(set(salt)) < 8:
+        raise ConfigError(
+            "POSTHOG_PSEUDONYM_SALT is too short or too repetitive to protect anything. "
+            "Use `openssl rand -hex 32`."
+        )
+
+    return PostHogSourceSettings(host=host, project_id=project_id, api_key=api_key, salt=salt)
+
+
 @dataclass(frozen=True, slots=True)
 class SocialShareTargetSettings:
     """Config for writing into `social_share` - a SEPARATE Postgres database
