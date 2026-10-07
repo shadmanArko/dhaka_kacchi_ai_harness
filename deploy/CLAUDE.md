@@ -77,6 +77,7 @@ This file is "how do I run it / change it."
     15 5 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-youtube >> /opt/dhaka-kacchi/logs/ingest-youtube.log 2>&1
     20 5 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-youtube-analytics >> /opt/dhaka-kacchi/logs/ingest-youtube-analytics.log 2>&1
     25 5 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-posthog >> /opt/dhaka-kacchi/logs/ingest-posthog.log 2>&1
+    30 5 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-search-console >> /opt/dhaka-kacchi/logs/ingest-search-console.log 2>&1
     30 5 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make refresh-social-share >> /opt/dhaka-kacchi/logs/refresh-social-share.log 2>&1
     15 6 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make run-detectors >> /opt/dhaka-kacchi/logs/detectors.log 2>&1
     ```
@@ -143,6 +144,22 @@ This file is "how do I run it / change it."
     Read the log for "properties nobody has reviewed" now and then: it lists
     fields PostHog sent that the allowlist dropped, each of which is either
     harmless (add it to ALLOWED) or a leak that was caught.
+
+    `ingest-search-console` runs at 5:30am. It signs in to Google as a SERVICE
+    ACCOUNT (a robot identity with a key file, added as a Restricted user on the
+    Search Console property) - no browser and no token that expires - and pulls
+    search performance for web and image search. The first run backfills about 16
+    months (the most the API keeps); later runs re-pull the last 10 days and
+    REPLACE that window. Only Google's FINAL data is stored, so the newest ~3 days
+    are absent until they settle, never zero. It needs SEARCH_CONSOLE_SITE_URL and
+    SEARCH_CONSOLE_SERVICE_ACCOUNT_B64 in this directory's `.env`. THE B64 VALUE
+    IS A PRIVATE KEY: use a dedicated service account with no other permissions,
+    so that whoever breaks into this server can read search statistics and
+    nothing else. If the key is revoked the job fails loudly and says to make a
+    new one. READ THE TABLES WITH CARE: only `search_site_daily` holds true totals.
+    The page and query tables omit rows too small or anonymized to publish (on the
+    real property, 32% of impressions and 17% of clicks survive there), so they say
+    WHICH pages and searches, never HOW MANY.
 
     WHAT DEPLOY DOES AND DOES NOT DO FOR A NEW SOURCE: pushing to `main`
     makes deploy.sh pull the code, apply every pending warehouse migration

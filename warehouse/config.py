@@ -7,6 +7,7 @@ fail-fast at load time, not at first query, and DATABASE_URL has no default.
 
 from __future__ import annotations
 
+import base64
 import os
 import sys
 from collections.abc import Mapping
@@ -510,6 +511,99 @@ def load_posthog_source_settings(
         )
 
     return PostHogSourceSettings(host=host, project_id=project_id, api_key=api_key, salt=salt)
+
+
+SEARCH_CONSOLE_API_BASE_DEFAULT = "https://www.googleapis.com/webmasters/v3"
+
+
+@dataclass(frozen=True, slots=True)
+class SearchConsoleSourceSettings:
+    """Config for reading Google Search Console (see warehouse/ingest/search_console.py).
+
+    Signs in as a Google SERVICE ACCOUNT: a robot identity with a key file, added
+    as a (Restricted, i.e. read-only) user on the property in Search Console.
+
+    The key can be supplied two ways because the two places this runs differ.
+    On a laptop a file path is natural. On the server the job runs inside a
+    container that cannot see the laptop's files, and a multi-line JSON key does
+    not survive a .env file, so there the whole key file is supplied base64-encoded
+    as ONE line. Exactly one of the two must be set.
+
+    `key_json` is the raw key text, parsed and validated by the caller
+    (google_service_account.parse_key), so that this module stays free of any
+    cryptography import.
+    """
+
+    site_url: str
+    key_json: str
+    key_source: str
+    api_base: str
+
+
+def load_search_console_source_settings(
+    environ: Mapping[str, str] | None = None,
+) -> SearchConsoleSourceSettings:
+    """Fail-fast config for warehouse/ingest/search_console.py."""
+    if environ is None:
+        load_dotenv(ENV_FILE, override=False)
+        environ = os.environ
+
+    site_url = (environ.get("SEARCH_CONSOLE_SITE_URL") or "").strip()
+    if not site_url:
+        raise ConfigError(
+            "SEARCH_CONSOLE_SITE_URL is required and has no default.\n"
+            f"  Set it in the process environment, or add it to {ENV_FILE} (see .env.example). "
+            "For a Domain property use sc-domain:yourdomain.com; for a URL-prefix property use "
+            "the exact address, e.g. https://yourdomain.com/ ."
+        )
+    if not (
+        (site_url.startswith("sc-domain:") and len(site_url) > len("sc-domain:") + 3)
+        or (site_url.startswith("https://") and site_url.endswith("/"))
+    ):
+        raise ConfigError(
+            f"SEARCH_CONSOLE_SITE_URL {site_url!r} is not a valid property. Use "
+            "'sc-domain:yourdomain.com' (Domain property) or 'https://yourdomain.com/' "
+            "(URL-prefix property, trailing slash required)."
+        )
+
+    key_file = (environ.get("SEARCH_CONSOLE_SERVICE_ACCOUNT_FILE") or "").strip()
+    key_b64 = (environ.get("SEARCH_CONSOLE_SERVICE_ACCOUNT_B64") or "").strip()
+    if bool(key_file) == bool(key_b64):
+        raise ConfigError(
+            "Set exactly ONE of SEARCH_CONSOLE_SERVICE_ACCOUNT_FILE (a path, for a laptop) or "
+            "SEARCH_CONSOLE_SERVICE_ACCOUNT_B64 (the key file base64-encoded onto one line, for "
+            "the server) - " + ("both are set." if key_file else "neither is set.")
+        )
+    if key_file:
+        path = Path(key_file).expanduser()
+        try:
+            key_json, source = path.read_text(), "SEARCH_CONSOLE_SERVICE_ACCOUNT_FILE"
+        except OSError as exc:
+            raise ConfigError(
+                f"SEARCH_CONSOLE_SERVICE_ACCOUNT_FILE {str(path)!r}: {exc.strerror}."
+            ) from None
+    else:
+        try:
+            key_json = base64.b64decode(key_b64, validate=True).decode()
+        except (ValueError, UnicodeDecodeError):
+            raise ConfigError(
+                "SEARCH_CONSOLE_SERVICE_ACCOUNT_B64 is not valid base64. Make it with: "
+                "base64 -i key.json | tr -d '\\n'"
+            ) from None
+        source = "SEARCH_CONSOLE_SERVICE_ACCOUNT_B64"
+
+    api_base = environ.get("SEARCH_CONSOLE_API_BASE_URL") or SEARCH_CONSOLE_API_BASE_DEFAULT
+    api_base = api_base.strip().rstrip("/")
+    parts = urlsplit(api_base)
+    if parts.scheme != "https" and not (parts.scheme == "http" and parts.hostname in _LOCAL_HOSTS):
+        raise ConfigError(
+            f"SEARCH_CONSOLE_API_BASE_URL {api_base!r} must be https. Plain http is only "
+            "accepted for localhost, which is what the verify script uses."
+        )
+
+    return SearchConsoleSourceSettings(
+        site_url=site_url, key_json=key_json, key_source=source, api_base=api_base
+    )
 
 
 @dataclass(frozen=True, slots=True)

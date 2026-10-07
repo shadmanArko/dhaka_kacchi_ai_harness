@@ -58,6 +58,10 @@ EXPECTED_TABLES = frozenset(
         "web_page_daily",
         "web_acquisition_daily",
         "web_event_daily",
+        "raw_search_console",
+        "search_site_daily",
+        "search_page_daily",
+        "search_query_daily",
     }
 )
 
