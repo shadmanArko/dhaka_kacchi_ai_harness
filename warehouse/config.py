@@ -368,6 +368,62 @@ def load_youtube_source_settings(
 
 
 @dataclass(frozen=True, slots=True)
+class YouTubeOAuthSettings:
+    """OAuth client credentials for the YouTube ANALYTICS API (watch time,
+    impressions, click-through rate), which - unlike the Data API's public
+    statistics - is only readable by the channel owner and so cannot use a
+    plain API key. See warehouse/ingest/youtube_auth.py.
+
+    `refresh_token` is Optional because the one-time helper that MINTS it needs
+    the client id/secret before any token exists; the ingester that spends it
+    asks for it to be required.
+    """
+
+    client_id: str
+    client_secret: str
+    refresh_token: str | None
+
+
+def load_youtube_oauth_settings(
+    environ: Mapping[str, str] | None = None,
+    *,
+    require_refresh_token: bool = True,
+) -> YouTubeOAuthSettings:
+    """Fail-fast config for the YouTube Analytics OAuth flow."""
+    if environ is None:
+        load_dotenv(ENV_FILE, override=False)
+        environ = os.environ
+
+    def need(name: str, hint: str) -> str:
+        value = (environ.get(name) or "").strip()
+        if not value:
+            raise ConfigError(
+                f"{name} is required and has no default.\n"
+                f"  Set it in the process environment, or add it to {ENV_FILE} "
+                f"(see .env.example). {hint}"
+            )
+        return value
+
+    client_id = need(
+        "YOUTUBE_OAUTH_CLIENT_ID",
+        "Google Cloud Console -> APIs & Services -> Credentials -> an OAuth client "
+        "of type 'Desktop app'.",
+    )
+    client_secret = need(
+        "YOUTUBE_OAUTH_CLIENT_SECRET", "It is in that client's downloaded client_secret JSON."
+    )
+    refresh_token = (environ.get("YOUTUBE_OAUTH_REFRESH_TOKEN") or "").strip() or None
+    if require_refresh_token and not refresh_token:
+        raise ConfigError(
+            "YOUTUBE_OAUTH_REFRESH_TOKEN is required and has no default.\n"
+            "  Mint one with `make youtube-auth` (a one-time browser consent)."
+        )
+    return YouTubeOAuthSettings(
+        client_id=client_id, client_secret=client_secret, refresh_token=refresh_token
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class SocialShareTargetSettings:
     """Config for writing into `social_share` - a SEPARATE Postgres database
     (not a schema inside `warehouse`) holding a decoupled, read-only copy of
