@@ -22,6 +22,7 @@ SEED_REV    := 0012
         ingest-posthog ingest-posthog-dry-run build-web-aggregates verify-ingest-posthog \
         ingest-search-console ingest-search-console-dry-run verify-ingest-search-console \
         ingest-social-followers ingest-social-followers-dry-run verify-ingest-social-followers \
+        ingest-links ingest-links-dry-run verify-ingest-links \
         run-detectors refresh-social-share \
         current history sql psql revision lint fmt
 
@@ -155,6 +156,15 @@ ingest-social-followers-dry-run:  ## read the four follower counts and print the
 
 verify-ingest-social-followers:  ## prove ingest-social-followers against a local fake of all four APIs and a throwaway database
 	$(PY) -m warehouse.ingest.social_followers_verify
+
+ingest-links:  ## turn the website's tagged links (Link builder) into channels/campaigns/variants and match them to posts; label earlier visits (needs the website's tracked_links table)
+	$(PY) -m warehouse.ingest.links
+
+ingest-links-dry-run:  ## list the tagged links at the source, write nothing
+	$(PY) -m warehouse.ingest.links --dry-run
+
+verify-ingest-links:  ## prove ingest-links against two throwaway databases (a warehouse and a stand-in website database), with mutation tests
+	$(PY) -m warehouse.ingest.links_verify
 
 ingest-posthog:  ## pull the website's PostHog events (scrubbed: hashed ids, no tokens/locations) and rebuild the daily web summaries (needs POSTHOG_* in .env)
 	$(PY) -m warehouse.ingest.posthog_web
