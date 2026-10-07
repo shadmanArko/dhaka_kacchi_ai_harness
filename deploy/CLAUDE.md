@@ -70,6 +70,7 @@ This file is "how do I run it / change it."
     ```
     0 3 * * * /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy/scripts/backup.sh >> /opt/dhaka-kacchi/logs/backup.log 2>&1
     0 * * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-direct >> /opt/dhaka-kacchi/logs/ingest.log 2>&1
+    2 * * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-links >> /opt/dhaka-kacchi/logs/ingest-links.log 2>&1
     5 * * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-events >> /opt/dhaka-kacchi/logs/ingest-events.log 2>&1
     30 4 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-instagram >> /opt/dhaka-kacchi/logs/ingest-instagram.log 2>&1
     45 4 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-facebook >> /opt/dhaka-kacchi/logs/ingest-facebook.log 2>&1
@@ -86,6 +87,35 @@ This file is "how do I run it / change it."
     never run concurrently and interleave in a shared log. Separate log file
     for the same reason (and so a grep for one job's output isn't polluted by
     the other's).
+
+    `ingest-links` runs hourly at :02, just BEFORE the events job at :05, on
+    purpose. It turns each link made in the website's admin Link builder into its
+    own campaign variant, and events are attributed to a link when they are
+    ingested - so a link has to be known first. (A link created and clicked
+    inside the same hour is still labelled correctly: the job also fills in
+    attribution for earlier events that have none, and never changes one that
+    has it.) **ONE-TIME STEP before the first run: the website's production
+    database needs its new table.** It must exist BEFORE the website deploys,
+    which is before the server has pulled the website repo, so the file
+    `dhaka-kacchi-connect/worker/migrations-manual/0004_tracked_links.sql` is not
+    on the server yet: paste its contents instead. From
+    `/opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy`, run
+    `docker compose exec -T postgres psql -U postgres ordering` with that SQL on
+    stdin (a `<<'EOF'` heredoc), or after the pull:
+    ```bash
+    docker compose exec -T postgres psql -U postgres ordering \
+      < ../../dhaka-kacchi-connect/worker/migrations-manual/0004_tracked_links.sql
+    ```
+    Check it with `\dp tracked_links`: `ordering_app` should hold `arw` and
+    `ordering_reader` `r`.
+    Apply it BEFORE deploying the website worker that serves the Link builder
+    (the page errors until the table exists), and before this cron line is
+    added (the job says so and exits 3 if the table is missing). It needs no new
+    `.env` value - it uses the same `ORDERING_DATABASE_URL`. Check
+    `ingest-links.log` the next hour; a "warning: N link(s) share a source and
+    content with an existing variant" line means someone reused the content name
+    `bio_link` (or another already-used one) for that source, and that link's
+    visits cannot be attributed until it is re-made with a new name.
 
     Instagram/Facebook/Threads are **daily, not hourly** - deliberately, not
     an oversight: Meta's own Page Insights docs state most metrics only
