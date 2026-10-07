@@ -62,6 +62,7 @@ EXPECTED_TABLES = frozenset(
         "search_site_daily",
         "search_page_daily",
         "search_query_daily",
+        "raw_social_followers",
     }
 )
 
