@@ -20,6 +20,7 @@ SEED_REV    := 0012
         ingest-youtube-analytics ingest-youtube-analytics-dry-run \
         verify-ingest-youtube-analytics \
         ingest-posthog ingest-posthog-dry-run build-web-aggregates verify-ingest-posthog \
+        ingest-search-console ingest-search-console-dry-run verify-ingest-search-console \
         run-detectors refresh-social-share \
         current history sql psql revision lint fmt
 
@@ -156,6 +157,15 @@ build-web-aggregates:  ## rebuild the daily web summaries from raw events alread
 
 verify-ingest-posthog:  ## prove the PostHog ingester and its privacy scrubbing against a fake PostHog and a throwaway database
 	$(PY) -m warehouse.ingest.posthog_verify
+
+ingest-search-console:  ## pull Google Search Console (search performance) via a read-only service account (needs SEARCH_CONSOLE_* in .env)
+	$(PY) -m warehouse.ingest.search_console
+
+ingest-search-console-dry-run:  ## show what ingest-search-console would replace, without writing
+	$(PY) -m warehouse.ingest.search_console --dry-run
+
+verify-ingest-search-console:  ## prove the Search Console ingester against a fake Google (checks the sign-in signature too) and a throwaway database
+	$(PY) -m warehouse.ingest.search_console_verify
 
 run-detectors:  ## run every ops detector, opening/resolving cockpit_alert rows (see ops/run_detectors.py)
 	$(PY) -m ops.run_detectors
