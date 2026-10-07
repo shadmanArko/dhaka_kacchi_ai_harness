@@ -176,7 +176,6 @@ _KNOWN_DROPPED_EXACT = frozenset(
         "$snapshot_max_depth_exceeded", "$geoip_latitude", "$geoip_longitude",
         "$geoip_postal_code", "$geoip_city_name", "$geoip_accuracy_radius",
         "$geoip_subdivision_2_code", "$geoip_subdivision_2_name", "$fbc", "$fbp",
-        "$session_entry_fbclid",
     }
 )  # fmt: skip
 _KNOWN_DROPPED_PATTERNS = (
@@ -186,10 +185,12 @@ _KNOWN_DROPPED_PATTERNS = (
     re.compile(r"^\$web_vitals_\w+_event$"),
     re.compile(r"^\$\w+_enabled_server_side$"),
     re.compile(r"^\$\w+_disabled_server_side$"),
-    re.compile(r"^\$session_entry_(fbclid|gclid|msclkid)$"),
+    # Click ids by the END of the name, so $session_entry_fbclid and any variant
+    # not yet invented are recognised as known-sensitive (they are dropped by the
+    # allowlist either way; this only keeps them out of the "unreviewed" report).
     re.compile(
-        r"^(\$initial_|\$)?(gclid|gad_source|gclsrc|dclid|gbraid|wbraid|fbclid|msclkid|twclid"
-        r"|li_fat_id|mc_cid|igshid|ttclid|rdt_cid|epik|qclid|sccid|_kx|irclid|fbc|fbp)$",
+        r"(^|[$_])(gclid|gad_source|gclsrc|dclid|gbraid|wbraid|fbclid|msclkid|twclid"
+        r"|li_fat_id|mc_cid|igshid|ttclid|rdt_cid|epik|qclid|sccid|kx|irclid|fbc|fbp)$",
         re.IGNORECASE,
     ),
 )
