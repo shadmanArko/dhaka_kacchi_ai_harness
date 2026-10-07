@@ -74,6 +74,7 @@ This file is "how do I run it / change it."
     30 4 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-instagram >> /opt/dhaka-kacchi/logs/ingest-instagram.log 2>&1
     45 4 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-facebook >> /opt/dhaka-kacchi/logs/ingest-facebook.log 2>&1
     0 5 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-threads >> /opt/dhaka-kacchi/logs/ingest-threads.log 2>&1
+    15 5 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make ingest-youtube >> /opt/dhaka-kacchi/logs/ingest-youtube.log 2>&1
     30 5 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make refresh-social-share >> /opt/dhaka-kacchi/logs/refresh-social-share.log 2>&1
     15 6 * * * cd /opt/dhaka-kacchi/dhaka_kacchi_ai_harness/deploy && docker compose run --rm warehouse make run-detectors >> /opt/dhaka-kacchi/logs/detectors.log 2>&1
     ```
@@ -95,6 +96,25 @@ This file is "how do I run it / change it."
     (graph.threads.net) and its own quota, so it can't contend with the
     other two even if it did overlap - the stagger is mostly to keep their
     logs from interleaving.
+
+    `ingest-youtube` runs daily at 5:15am, right behind Threads, for the same
+    reason as the Meta jobs (a post's numbers are cumulative; hourly reads add
+    cost, not information). Unlike them it is FAST - a handful of API calls
+    for the whole channel, seconds not minutes - and it uses Google's quota,
+    not Meta's, so it cannot contend with anything above. It needs
+    `YOUTUBE_API_KEY` and `YOUTUBE_CHANNEL_ID` in this directory's `.env` (see
+    `.env.example`); unlike the Threads token the API key never expires. YouTube
+    rows are deliberately NOT mirrored into `social_share` - that job has an
+    explicit platform allowlist (`SHARED_PLATFORMS` in ops/refresh_social_share.py),
+    so sharing YouTube with the collaborator is a decision, not a side effect.
+
+    WHAT DEPLOY DOES AND DOES NOT DO FOR A NEW SOURCE: pushing to `main`
+    makes deploy.sh pull the code, apply every pending warehouse migration
+    (so the schema is ready with no manual step), and run `make verify` and
+    `make gate`. It does NOT write secrets into `.env` and does NOT edit the
+    crontab - both are hand-done on the VPS, once, and a new ingester that is
+    missing either fails quietly in its own log file rather than loudly in the
+    deploy. After adding a source, check its log the next morning.
 
     `refresh-social-share` (ops/refresh_social_share.py, see this file's own
     "Social share database" section) runs at 5:30am, after Threads lands

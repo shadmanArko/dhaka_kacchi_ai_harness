@@ -15,6 +15,7 @@ SEED_REV    := 0012
         verify-ingest-events ingest-instagram ingest-instagram-dry-run \
         ingest-facebook ingest-facebook-dry-run \
         ingest-threads ingest-threads-dry-run \
+        ingest-youtube ingest-youtube-dry-run verify-ingest-youtube \
         run-detectors refresh-social-share \
         current history sql psql revision lint fmt
 
@@ -112,6 +113,15 @@ ingest-threads:  ## pull organic Threads post data via the Threads API (needs TH
 
 ingest-threads-dry-run:  ## show what ingest-threads would write, without writing
 	$(PY) -m warehouse.ingest.threads --dry-run
+
+ingest-youtube:  ## pull YouTube video data via the Data API v3 (needs YOUTUBE_API_KEY + YOUTUBE_CHANNEL_ID - see warehouse/ingest/youtube.py)
+	$(PY) -m warehouse.ingest.youtube
+
+ingest-youtube-dry-run:  ## show what ingest-youtube would write, without writing
+	$(PY) -m warehouse.ingest.youtube --dry-run
+
+verify-ingest-youtube:  ## prove ingest-youtube against a local fake YouTube API and a throwaway database (needs no YouTube account; never touches your dev data)
+	$(PY) -m warehouse.ingest.youtube_verify
 
 run-detectors:  ## run every ops detector, opening/resolving cockpit_alert rows (see ops/run_detectors.py)
 	$(PY) -m ops.run_detectors

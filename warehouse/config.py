@@ -12,6 +12,7 @@ import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 from sqlalchemy.engine import URL, make_url
@@ -292,6 +293,78 @@ def load_threads_source_settings(
         )
 
     return ThreadsSourceSettings(access_token=access_token, user_id=user_id)
+
+
+YOUTUBE_API_BASE_DEFAULT = "https://www.googleapis.com/youtube/v3"
+
+
+@dataclass(frozen=True, slots=True)
+class YouTubeSourceSettings:
+    """Config for reading YouTube video data via the YouTube Data API v3 (the
+    'youtube' ingestion channel - see warehouse/ingest/youtube.py).
+
+    Stage 1 needs only a plain API key (no OAuth, no consent screen): the Data
+    API serves public video statistics to any valid key. The deeper analytics
+    (watch time, impressions, CTR) need OAuth as the channel owner and are a
+    separate, later stage with its own settings.
+
+    `api_base` exists as a test seam (warehouse/ingest/youtube_verify.py points
+    it at a local fake server) and is validated like any other place this key
+    is sent: https, unless the host is local.
+    """
+
+    api_key: str
+    channel_id: str
+    api_base: str
+
+
+def load_youtube_source_settings(
+    environ: Mapping[str, str] | None = None,
+) -> YouTubeSourceSettings:
+    """Fail-fast config for warehouse/ingest/youtube.py. Same idiom as the
+    other load_*_source_settings() functions."""
+    if environ is None:
+        load_dotenv(ENV_FILE, override=False)
+        environ = os.environ
+
+    api_key = (environ.get("YOUTUBE_API_KEY") or "").strip()
+    if not api_key:
+        raise ConfigError(
+            "YOUTUBE_API_KEY is required and has no default.\n"
+            "  Set it in the process environment, or add it to "
+            f"{ENV_FILE} (see .env.example). Create it in Google Cloud Console -> "
+            "APIs & Services -> Credentials, with the YouTube Data API v3 enabled "
+            "on that project - see warehouse/ingest/youtube.py's module docstring."
+        )
+
+    channel_id = (environ.get("YOUTUBE_CHANNEL_ID") or "").strip()
+    if not channel_id:
+        raise ConfigError(
+            "YOUTUBE_CHANNEL_ID is required and has no default.\n"
+            "  Set it in the process environment, or add it to "
+            f"{ENV_FILE} (see .env.example)."
+        )
+    # The single most likely mistake: pasting the @handle or a channel URL.
+    # Neither works with this API's `channels.list?id=` lookup, and the failure
+    # it would produce ("channel not found") points nowhere near the cause.
+    if not (channel_id.startswith("UC") and len(channel_id) == 24):
+        raise ConfigError(
+            f"YOUTUBE_CHANNEL_ID {channel_id!r} is not a channel id.\n"
+            "  It must be the 24-character id starting 'UC', not the @handle and not a "
+            "URL. Find it in YouTube Studio -> Settings -> Channel -> Advanced settings, "
+            "or youtube.com/account_advanced while signed in."
+        )
+
+    api_base = (environ.get("YOUTUBE_API_BASE_URL") or YOUTUBE_API_BASE_DEFAULT).strip().rstrip("/")
+    parts = urlsplit(api_base)
+    if parts.scheme != "https" and not (parts.scheme == "http" and parts.hostname in _LOCAL_HOSTS):
+        raise ConfigError(
+            f"YOUTUBE_API_BASE_URL {api_base!r} must be https (the API key is sent in the "
+            "query string). Plain http is only accepted for localhost, which is what "
+            "youtube_verify.py uses."
+        )
+
+    return YouTubeSourceSettings(api_key=api_key, channel_id=channel_id, api_base=api_base)
 
 
 @dataclass(frozen=True, slots=True)

@@ -37,7 +37,13 @@ _SQL = sa.text(
             sp.platform,
             CASE WHEN sp.posted_at >= now() - interval '14 days' THEN 'recent' ELSE 'prior' END
                 AS bucket,
-            (ls.likes + ls.comments + ls.shares) AS engagement
+            -- COALESCE each term: a platform that does not report one of them
+            -- (YouTube has no share count) stores NULL since 0030, and
+            -- `likes + comments + NULL` is NULL - which would drop every such
+            -- post out of avg() and silently switch alerting off for that
+            -- platform. Platforms that report all three are unaffected.
+            (COALESCE(ls.likes, 0) + COALESCE(ls.comments, 0) + COALESCE(ls.shares, 0))
+                AS engagement
         FROM social_post sp
         JOIN latest_snapshot ls ON ls.social_post_id = sp.id
         WHERE sp.posted_at >= now() - interval '28 days'
