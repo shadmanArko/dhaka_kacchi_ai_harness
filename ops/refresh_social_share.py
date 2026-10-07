@@ -29,6 +29,20 @@ from warehouse.config import ConfigError, load_settings, load_social_share_targe
 # post even though today there is only ever one (see ml/01-data/report.md's
 # identical reasoning) - correct now and if periodic re-snapshots are ever
 # added later.
+# WHICH PLATFORMS LEAVE THE BUILDING is an explicit allowlist, not "whatever is
+# in social_post". This query used to have no platform filter at all, so the
+# first YouTube ingest followed by the next daily refresh would have handed an
+# outside collaborator YouTube data nobody had decided to share. Adding a
+# platform to this tuple is a deliberate act - sharing it is a decision, not a
+# side effect of ingesting it.
+SHARED_PLATFORMS = ("instagram", "facebook", "threads")
+
+# COALESCE(..., 0) is a compatibility shim, not a statement of fact: the shared
+# table's metric columns are NOT NULL (deploy/postgres-init/01-init-databases.sh,
+# a one-time init script this repo cannot alter from a migration), and the
+# warehouse columns became nullable in 0030. For the three shared platforms
+# every value is already a real integer, so this changes nothing today; it
+# exists so a future NULL cannot make TRUNCATE-then-INSERT fail halfway.
 EXTRACT_SQL = """
     SELECT
         sp.id,
@@ -37,7 +51,13 @@ EXTRACT_SQL = """
         sp.posted_at,
         sp.caption,
         sp.permalink,
-        m.impressions, m.reach, m.likes, m.comments, m.shares, m.saves, m.clicks
+        COALESCE(m.impressions, 0) AS impressions,
+        COALESCE(m.reach, 0)       AS reach,
+        COALESCE(m.likes, 0)       AS likes,
+        COALESCE(m.comments, 0)    AS comments,
+        COALESCE(m.shares, 0)      AS shares,
+        COALESCE(m.saves, 0)       AS saves,
+        COALESCE(m.clicks, 0)      AS clicks
     FROM social_post sp
     JOIN LATERAL (
         SELECT impressions, reach, likes, comments, shares, saves, clicks
@@ -46,6 +66,7 @@ EXTRACT_SQL = """
         ORDER BY s.captured_at DESC
         LIMIT 1
     ) m ON true
+    WHERE sp.platform = ANY(:platforms)
     ORDER BY sp.posted_at
 """
 
@@ -67,7 +88,12 @@ def run() -> int:
     target_engine = create_engine(target_settings.sqlalchemy_url)
 
     with source_engine.connect() as conn:
-        rows = [dict(row) for row in conn.execute(text(EXTRACT_SQL)).mappings()]
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                text(EXTRACT_SQL), {"platforms": list(SHARED_PLATFORMS)}
+            ).mappings()
+        ]
 
     # TRUNCATE + insert in one transaction: the reader role never sees a
     # half-refreshed (or briefly empty) table, only the old snapshot or the
