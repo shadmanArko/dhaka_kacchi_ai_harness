@@ -47,6 +47,27 @@ from rag.config import ConfigError, RagAdminSettings, load_rag_admin_settings
 # Flagged in RAG_progress.md as worth revisiting later, not as final.
 RAG_DATABASE_NAME = "dhaka_kacchi_rag"
 RAG_WRITER_ROLE = "rag_writer"
+
+# The two reader roles introduced by the multi-store design (see
+# rag/MULTI_STORE_DESIGN.md section 6). There is one role per AUDIENCE, never
+# one per table: a role answers "who is asking", not "what are they asking
+# for". Adding a store never creates a role; adding a genuinely different
+# kind of caller does.
+#
+#   rag_public_reader   - may read stores whose visibility is "public". Used
+#                         by anything facing people we do not trust, such as
+#                         a customer-facing chatbot.
+#   rag_internal_reader - may read every store. Made a MEMBER of the public
+#                         role (see create_roles further down), so it
+#                         inherits every public-store grant automatically and
+#                         those grants only ever have to be written once.
+RAG_PUBLIC_READER_ROLE = "rag_public_reader"
+RAG_INTERNAL_READER_ROLE = "rag_internal_reader"
+
+# LEGACY: the single reader role from before the multi-store design. It can
+# read the original `chunks` table and nothing else. Kept only so the
+# existing system keeps working during the migration - once the old `chunks`
+# table is dropped (design doc phase 6), this role is retired too.
 RAG_READER_ROLE = "rag_reader"
 
 # The Postgres error code ("SQLSTATE") for "you tried to create something
@@ -62,8 +83,14 @@ DUPLICATE_DATABASE = "42P04"
 DUPLICATE_OBJECT = "42710"
 
 
-def _q(identifier: str) -> str:
-    """Quote a Postgres identifier. Identifiers cannot be bind parameters."""
+def quote_identifier(identifier: str) -> str:
+    """Quote a Postgres identifier. Identifiers cannot be bind parameters.
+
+    Public (no leading underscore) because rag/schema.py needs exactly this
+    same escaping for the table and role names it interpolates into GRANT
+    statements - sharing the one implementation is safer than having two
+    copies that could drift apart.
+    """
     # Postgres identifiers (table names, database names, role names) can't
     # be passed as query parameters the way values can - SQL simply has no
     # syntax for "a parameter standing in for a name". So instead we wrap
@@ -103,6 +130,28 @@ def _admin_engine(settings: RagAdminSettings) -> sa.Engine:
     )
 
 
+def admin_engine_on_rag_db(settings: RagAdminSettings) -> sa.Engine:
+    """An admin engine pointed at dhaka_kacchi_rag ITSELF, not at the
+    maintenance database.
+
+    `_admin_engine` above connects wherever the admin URL points - which,
+    for one-time setup, is the `postgres` maintenance database, because
+    dhaka_kacchi_rag does not exist yet the first time this script runs.
+    Every LATER admin task (creating tables, granting privileges, verifying
+    grants) has to happen INSIDE the real database instead, and this is the
+    shared way to get there: take the admin URL and swap just the
+    database-name portion.
+
+    Public (no leading underscore) because both rag/schema.py and
+    rag/verify_stores.py need exactly this, and two copies of it would
+    eventually disagree about something.
+    """
+    # `.set(database=...)` returns a new URL object with just that one part
+    # changed - the host, port, user and password are carried over untouched.
+    target_url = settings.sqlalchemy_url.set(database=RAG_DATABASE_NAME)
+    return sa.create_engine(target_url, poolclass=sa.pool.NullPool)
+
+
 def create_database(settings: RagAdminSettings) -> int:
     """CREATE DATABASE dhaka_kacchi_rag, unless it already exists."""
     # Open one admin connection (to the `postgres` maintenance database,
@@ -129,7 +178,7 @@ def create_database(settings: RagAdminSettings) -> int:
             # warehouse/bootstrap_db.py's identical line.
             conn.execute(
                 sa.text(
-                    f"CREATE DATABASE {_q(RAG_DATABASE_NAME)} "
+                    f"CREATE DATABASE {quote_identifier(RAG_DATABASE_NAME)} "
                     "TEMPLATE template1 ENCODING 'UTF8'"
                 )
             )
@@ -211,11 +260,11 @@ def _create_role_if_absent(conn: sa.Connection, role_name: str) -> str | None:
         # parameter version of this line failed against the real database
         # with "syntax error at or near $1" even though that exact pattern
         # works for every other value in this file. _quote_literal() does
-        # the escaping _q() does for identifiers, just for string values
-        # instead of names.
+        # the escaping quote_identifier() does for identifiers, just for
+        # string values instead of names.
         conn.execute(
             sa.text(
-                f"CREATE ROLE {_q(role_name)} "
+                f"CREATE ROLE {quote_identifier(role_name)} "
                 f"WITH LOGIN PASSWORD {_quote_literal(password)} "
                 "NOSUPERUSER NOCREATEDB NOCREATEROLE"
             )
@@ -235,36 +284,73 @@ def _create_role_if_absent(conn: sa.Connection, role_name: str) -> str | None:
 
 
 def create_roles(settings: RagAdminSettings) -> int:
-    """CREATE ROLE rag_writer and rag_reader, unless they already exist -
-    each with a freshly generated random password, printed ONCE so it can
-    be copied into .env. There is no way to retrieve a Postgres role's
+    """CREATE the writer role and both reader roles, unless they already
+    exist - each with a freshly generated random password, printed ONCE so it
+    can be copied into .env. There is no way to retrieve a Postgres role's
     password after the fact (Postgres only ever stores a hash of it, never
     the plaintext) - if this output is lost, the only fix is resetting the
     password with ALTER ROLE, not recovering the original.
 
-    Grants are intentionally NOT set here yet - the chunks table doesn't
-    exist until the schema step (RAG_progress.md next-steps #3), and you
-    can't GRANT privileges on a table that isn't there yet. This function
-    only creates the two identities; a later step grants rag_writer
-    INSERT/UPDATE and rag_reader SELECT on the chunks table specifically,
-    once that table exists.
+    Four roles, deliberately NOT one per table: a role answers "who is
+    asking", never "what are they asking for" (see the role constants'
+    comment at the top of this file, and rag/MULTI_STORE_DESIGN.md section
+    6). WHICH tables each reader may actually see is decided later, by the
+    grants that rag/schema.py applies.
+
+    Table grants are therefore intentionally NOT set here - the tables don't
+    exist yet at this point. There is exactly one exception, below: the role
+    MEMBERSHIP, which is a relationship between two roles rather than a
+    privilege on a table, and so can be established immediately.
     """
     with _admin_engine(settings).connect() as conn:
+        # The ingestion identity: writes to every store, reads none of them
+        # for its own purposes.
         writer_password = _create_role_if_absent(conn, RAG_WRITER_ROLE)
+
+        # The two reader identities introduced by the multi-store design.
+        public_password = _create_role_if_absent(conn, RAG_PUBLIC_READER_ROLE)
+        internal_password = _create_role_if_absent(conn, RAG_INTERNAL_READER_ROLE)
+
+        # LEGACY: the original single reader role, kept only while the old
+        # `chunks` table is still in use. Retired together with that table
+        # once the migration finishes (design doc phase 6).
         reader_password = _create_role_if_absent(conn, RAG_READER_ROLE)
+
+        # Make the internal reader a MEMBER of the public reader. From here
+        # on, every grant made to the public role is automatically inherited
+        # by the internal one - so a public store's SELECT only ever has to be
+        # written once, however many reader tiers sit above it.
+        #
+        # Note the direction, which is the opposite of how it first reads: the
+        # MORE privileged identity is granted the LESSER one's rights, never
+        # the other way round. Granting the public role to itself through the
+        # internal one would hand public callers everything.
+        #
+        # Re-running this is harmless: Postgres treats a repeat membership
+        # grant as a no-op notice, not an error.
+        conn.execute(
+            sa.text(
+                f"GRANT {quote_identifier(RAG_PUBLIC_READER_ROLE)} "
+                f"TO {quote_identifier(RAG_INTERNAL_READER_ROLE)}"
+            )
+        )
 
     # Print any freshly generated passwords together, clearly labelled, at
     # the very end - easier to find and copy than if they were scattered
-    # between the two individual "created role" lines above.
-    if writer_password or reader_password:
+    # between the individual "created role" lines above.
+    if writer_password or public_password or internal_password or reader_password:
         print()
         print("=== SAVE THESE NOW - shown only this once ===")
         if writer_password:
             print(f"  {RAG_WRITER_ROLE} password: {writer_password}")
+        if public_password:
+            print(f"  {RAG_PUBLIC_READER_ROLE} password: {public_password}")
+        if internal_password:
+            print(f"  {RAG_INTERNAL_READER_ROLE} password: {internal_password}")
         if reader_password:
-            print(f"  {RAG_READER_ROLE} password: {reader_password}")
-        print("Copy these into .env as part of RAG_WRITER_DATABASE_URL / "
-              "RAG_READER_DATABASE_URL before you close this terminal.")
+            print(f"  {RAG_READER_ROLE} (legacy) password: {reader_password}")
+        print("Copy these into .env as part of RAG_WRITER_DATABASE_URL,")
+        print("RAG_PUBLIC_READER_DATABASE_URL and RAG_INTERNAL_READER_DATABASE_URL.")
         print("===============================================")
 
     return 0

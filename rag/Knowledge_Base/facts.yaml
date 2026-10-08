@@ -1,0 +1,60 @@
+# Changing facts: the single source of truth for prices, times and logistics. Agents and the customer chatbot read
+# these through a live tool. They never quote them from the brand book text, so nothing goes stale.
+# Values below are the latest seen in our posts (up to 2026-09-22). Every [CONFIRM] needs the owner.
+version: 2026-10-06-draft
+currency: EUR
+prices_include_vat: null          # [CONFIRM] German law (PAngV): advertised prices must be final prices incl. VAT
+
+menu:
+  - id: mutton_kacchi_regular
+    name: Mutton Kacchi Biryani — Regular Box
+    size_ml: 1000
+    price: null                   # [CONFIRM] lamb box was 15.00 (Apr–Aug 2026); mutton price not stated in posts
+    available: true
+  - id: kacchi_taster
+    name: Kacchi Taster Box
+    size_ml: 750
+    price: 9.99                   # introduced 2026-07-11 [CONFIRM still offered, and mutton or lamb]
+    available: null
+  - id: lamb_kacchi_regular
+    name: Smokey Lamb Kacchi — Regular Box
+    size_ml: 1000
+    price: 15.00
+    available: null               # [CONFIRM] replaced by mutton in Sep 2026?
+  - id: shahi_borhani
+    name: Shahi Borhani
+    size_ml: 500
+    price: 6.00
+    available: true
+  - id: chutney
+    name: Tok-Jhal-Mishti Chutney
+    price: null                   # [CONFIRM] included with kacchi or separate?
+    available: true
+
+ordering:
+  channels: [whatsapp, website]
+  whatsapp: "+49 155 63583687"
+  website: https://www.dhakakacchi.com/
+  email: hello@dhakakacchi.com
+  order_deadline: "Friday 18:00"  # [CONFIRM] posts said Thu 24:00, Fri 12:00, Fri 16:00, Fri 17:00; website says Fri 18:00
+  cooking_day: Saturday
+  delivery_day: Saturday
+  weekly_slots: 25                # grew 10 -> 15 -> 20 -> 25 [CONFIRM current]
+  minimum_order: null             # [CONFIRM] earlier "2 boxes per person" and "10 orders to confirm the batch"
+  confirmation: personal message before Saturday
+
+fulfilment:
+  pickup:
+    location: "Leopoldplatz, Berlin-Wedding (in front of Lidl)"   # [CONFIRM] website says "our Wedding kitchen"
+    fee: 0.00
+  home_delivery:
+    area: Berlin only
+    fees: [{max_km: 5, fee: 5.00}, {max_km: 10, fee: 7.00}, {max_km: 15, fee: 9.00}]   # since 2026-08-30
+    outside_berlin: pickup only
+  catering: on request (corporate, events, family and community gatherings)
+
+claims_status:                    # what we may say publicly (legal check before use)
+  halal: { say: "halal mutton", certified: null, certifier: null }        # [CONFIRM] "100% halal" only with a named source / certifier
+  homemade: true
+  never_frozen: null              # [CONFIRM] website says "never freeze"
+  food_business_registration: null  # [CONFIRM] registration with the Lebensmittelaufsicht (in progress)

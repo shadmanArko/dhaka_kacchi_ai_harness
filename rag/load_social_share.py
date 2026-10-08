@@ -28,7 +28,15 @@ from pathlib import Path
 # file that writes SQL directly rather than going through ingest_source().
 import sqlalchemy as sa
 
-from rag.config import ConfigError, load_rag_writer_settings
+# The shared identifier-quoting helper: prune_orphaned() below splices this
+# store's table name into a DELETE, and a table name can never be a bind
+# parameter.
+from rag.bootstrap_db import quote_identifier
+
+# load_store_registry is how this loader finds out which table to write to
+# and how big its chunks should be - both now live in rag/stores.toml rather
+# than as constants in this file.
+from rag.config import ConfigError, load_rag_writer_settings, load_store_registry
 from rag.ingest import ingest_source
 
 # Where the exported CSV lives - see rag/data/'s own .gitignore entry
@@ -36,12 +44,16 @@ from rag.ingest import ingest_source
 # text, not synthetic test data.
 CSV_PATH = Path(__file__).resolve().parent / "data" / "social_post_metrics.csv"
 
-# Chunk settings tuned specifically for THIS corpus's real token-count
-# distribution under the bge-m3 tokenizer (RAG_progress.md decision #18):
-# median 38 tokens, p75 103 - size 100 keeps most captions whole in a
-# single chunk, only splitting the genuinely long, multi-beat posts.
-CHUNK_SIZE_TOKENS = 100
-OVERLAP_TOKENS = 20
+# The LOGICAL store name this loader feeds, exactly as registered in
+# rag/stores.toml.
+#
+# The chunk settings that used to sit here as module constants (100/20,
+# RAG_progress.md decision #18 - tuned against this corpus's real token-count
+# distribution, median 38 tokens and p75 103) now live in that file, beside
+# the store they describe. Two consequences worth having: retuning this
+# corpus is a config edit rather than a code change, and the loader and the
+# retriever can no longer drift apart about which store is which.
+STORE_NAME = "social_share"
 
 # A value the source CSV uses to represent SQL NULL when exported as text
 # - psql's \copy and plain CSV writers don't agree on one universal
@@ -98,6 +110,13 @@ def load_all() -> dict:
     """
     settings = load_rag_writer_settings()
 
+    # Look this corpus up in the registry once, up front: it tells us which
+    # physical table to write to and how big this corpus's chunks should be.
+    # Resolving it here rather than per row means a misconfigured store name
+    # fails immediately, before any embedding work has been done.
+    registry = load_store_registry()
+    store = registry.get(STORE_NAME)
+
     with CSV_PATH.open(encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
 
@@ -111,11 +130,17 @@ def load_all() -> dict:
             continue
 
         written = ingest_source(
+            # Which store this belongs to - resolved to a table by
+            # ingest_source() through the same registry.
+            store=STORE_NAME,
+            registry=registry,
             text=row["caption"],
             source_path=f"social_post_metrics:{row['id']}",
             source_type="csv",
-            chunk_size_tokens=CHUNK_SIZE_TOKENS,
-            overlap_tokens=OVERLAP_TOKENS,
+            # Chunk settings come from the registry entry, not from constants
+            # in this file - see STORE_NAME's comment above.
+            chunk_size_tokens=store.chunk_size_tokens,
+            overlap_tokens=store.overlap_tokens,
             settings=settings,
             metadata=_build_metadata(row),
         )
@@ -147,33 +172,39 @@ def prune_orphaned() -> int:
     """
     settings = load_rag_writer_settings()
 
+    # The physical table this corpus lives in, resolved through the registry.
+    # Scoping the delete to a whole TABLE is now what keeps this prune from
+    # touching another corpus's rows - the previous version had to filter on
+    # `source_path LIKE 'social_post_metrics:%'` to get the same isolation,
+    # because every corpus shared one table. With one table per store, that
+    # filter is unnecessary: this statement simply cannot see anything else.
+    registry = load_store_registry()
+    table = registry.get(STORE_NAME).table
+
     with CSV_PATH.open(encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
 
     # Every source_path that SHOULD exist right now, based on the current
-    # CSV - anything in `chunks` whose source_path isn't in this set is,
-    # by definition, orphaned.
+    # CSV - anything in this store's table whose source_path isn't in this
+    # set is, by definition, orphaned.
     expected_source_paths = {
         f"social_post_metrics:{row['id']}" for row in rows if _has_real_caption(row["caption"])
     }
 
     engine = sa.create_engine(settings.sqlalchemy_url, poolclass=sa.pool.NullPool)
     with engine.begin() as conn:
-        # Scoped to source_path starting with "social_post_metrics:" so
-        # this can never touch a future, differently-sourced chunk that
-        # happens to also have source_type='csv' - only this loader's own
-        # rows are ever candidates for deletion here.
-        # CAST(:expected AS text[]) explicitly, same lesson learned the
-        # hard way with the vector query in retrieval.py: without an
-        # explicit cast, Postgres can't always infer what type a bound
-        # Python list should become, and refuses the query outright
-        # rather than guessing.
+        # CAST(:expected AS text[]) explicitly, same lesson learned the hard
+        # way with the vector query in retrieval.py: without an explicit
+        # cast, Postgres can't always infer what type a bound Python list
+        # should become, and refuses the query outright rather than guessing.
+        #
+        # The table name, by contrast, CANNOT be a parameter - so it is
+        # quoted instead, with the same helper the setup scripts use.
         result = conn.execute(
             sa.text(
-                """
-                DELETE FROM chunks
-                WHERE source_path LIKE 'social_post_metrics:%'
-                  AND source_path != ALL(CAST(:expected AS text[]))
+                f"""
+                DELETE FROM {quote_identifier(table)}
+                WHERE source_path != ALL(CAST(:expected AS text[]))
                 """
             ),
             {"expected": list(expected_source_paths)},

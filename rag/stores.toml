@@ -1,0 +1,54 @@
+# rag/stores.toml
+# ----------------
+# The store registry: the list of every vector store this RAG subsystem knows
+# about, and everything the code needs to know about each one.
+#
+# This file is CONFIGURATION, not enforcement. It says which stores exist and
+# how they should be treated - it does NOT decide who may read them. That
+# decision lives entirely in Postgres GRANTs (see schema.py / bootstrap_db.py).
+# If a `visibility` value here ever disagrees with the real grants, the grants
+# win and `rag/verify_stores.py` reports the drift.
+#
+# Adding a store = add a block below, create its table (schema.py), and grant
+# the right roles. No Python changes are required.
+#
+# Each value's meaning:
+#   table              - the PHYSICAL table name in dhaka_kacchi_rag. Never
+#                        comes from a caller; callers only ever use the
+#                        logical name (the [stores.<name>] key).
+#   visibility         - "public" or "internal". A declaration of intent,
+#                        checked against the real grants by verify_stores.py.
+#   chunk_size_tokens  - how big each chunk should be, measured in the
+#                        embedding model's own tokens. Used ONLY by the
+#                        loaders at ingestion time.
+#   overlap_tokens     - how many tokens consecutive chunks share at their
+#                        boundary. Must be smaller than chunk_size_tokens.
+#                        Used ONLY by the loaders.
+#   description        - plain-language summary of what this store contains.
+#                        This is PROMPT TEXT, not documentation: an AI agent
+#                        reads it when choosing which store to search, so it
+#                        should answer "what kinds of questions does this
+#                        store hold the answer to?"
+
+# The company's own social media posts: public-facing marketing content that
+# was literally published to the world, so a customer-facing chatbot may read
+# it. Chunk settings tuned in RAG_progress.md decision #18 against the real
+# token-count distribution of these captions (median 38 tokens, p75 103).
+[stores.social_share]
+table              = "chunks_social_share"
+visibility         = "public"
+chunk_size_tokens  = 100
+overlap_tokens     = 20
+description        = "The restaurant's own social media posts: menu item highlights, promotions, and the story behind the kacchi box. Use this for questions about what we sell, what we promote, and how we talk about our food publicly."
+
+# Technical and legal reference documents kept for internal use: machine
+# learning research papers and SEC contract exhibits. These are internal
+# reference material - a customer-facing chatbot must never surface them.
+# Chunk settings from RAG_progress.md decision #27, measured against the real
+# documents (median 1079 tokens per page, far denser than social captions).
+[stores.knowledge_base]
+table              = "chunks_knowledge_base"
+visibility         = "internal"
+chunk_size_tokens  = 250
+overlap_tokens     = 50
+description        = "Internal reference library: machine-learning research papers (attention mechanisms, transformers, image models) and legal contract exhibits. Use this for technical or contractual questions about the underlying methods and agreements."

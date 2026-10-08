@@ -27,7 +27,14 @@ from pypdf import PdfReader
 # (same pattern and same reason as load_social_share.py's import of it).
 import sqlalchemy as sa
 
-from rag.config import ConfigError, load_rag_writer_settings
+# The shared identifier-quoting helper: prune_orphaned() splices this store's
+# table name into a DELETE, and a table name can never be a bind parameter.
+from rag.bootstrap_db import quote_identifier
+
+# load_store_registry is how this loader finds out which table to write to and
+# how big its chunks should be - both now live in rag/stores.toml rather than
+# as constants in this file.
+from rag.config import ConfigError, load_rag_writer_settings, load_store_registry
 from rag.ingest import ingest_source
 
 # Resolved once, absolute - the same root both this loader and webui.py's
@@ -36,16 +43,18 @@ from rag.ingest import ingest_source
 KNOWLEDGE_BASE_DIR = (Path(__file__).resolve().parent / "Knowledge_Base").resolve()
 DOCUMENTS_DIR = KNOWLEDGE_BASE_DIR / "documents"
 
-# Chunk settings for this corpus specifically - measured real bge-m3
-# token counts across all 174 real documents/pages (RAG_progress.md
-# decision #27): min 31, median 1079, p25 764, p75 1434, max 38545 (one
-# very long .htm contract) - academic papers and legal exhibits run far
-# denser/longer than social media captions (decision #18's 100/20), so
-# these are deliberately bigger. Given the median is ~4x this chunk size,
-# a typical page/document still splits into several focused chunks,
-# which is the right granularity for dense technical/legal text.
-CHUNK_SIZE_TOKENS = 250
-OVERLAP_TOKENS = 50
+# The LOGICAL store name this loader feeds, exactly as registered in
+# rag/stores.toml.
+#
+# The chunk settings that used to sit here as module constants (250/50,
+# RAG_progress.md decision #27 - measured against real bge-m3 token counts
+# across all 174 documents/pages: min 31, median 1079, p75 1434, max 38545,
+# deliberately far bigger than decision #18's 100/20 because academic papers
+# and legal exhibits run much denser than social captions) now live in that
+# file, beside the store they describe. Retuning this corpus is therefore a
+# config edit rather than a code change, and the loader and the retriever can
+# no longer drift apart about which store is which.
+STORE_NAME = "knowledge_base"
 
 # urls.txt is a manifest (original source URL per .htm file), never
 # ingested as searchable content itself - see decision #26.
@@ -117,6 +126,14 @@ def load_all() -> dict:
     rows.
     """
     settings = load_rag_writer_settings()
+
+    # Look this corpus up in the registry once, up front: it tells us which
+    # physical table to write to and how big this corpus's chunks should be.
+    # Resolving it here rather than per file means a misconfigured store name
+    # fails immediately, before any PDF parsing or embedding has happened.
+    registry = load_store_registry()
+    store = registry.get(STORE_NAME)
+
     url_manifest = _load_url_manifest()
 
     files_ingested = 0
@@ -150,11 +167,17 @@ def load_all() -> dict:
                 if not page_text.strip():
                     continue
                 total_chunks_written += ingest_source(
+                    # Which store this belongs to - resolved to a table by
+                    # ingest_source() through the same registry.
+                    store=STORE_NAME,
+                    registry=registry,
                     text=page_text,
                     source_path=f"{rel_path}::page{page_num}",
                     source_type="pdf",
-                    chunk_size_tokens=CHUNK_SIZE_TOKENS,
-                    overlap_tokens=OVERLAP_TOKENS,
+                    # Chunk settings come from the registry entry, not from
+                    # constants in this file - see STORE_NAME above.
+                    chunk_size_tokens=store.chunk_size_tokens,
+                    overlap_tokens=store.overlap_tokens,
                     settings=settings,
                     metadata={"page_number": page_num},
                 )
@@ -169,11 +192,13 @@ def load_all() -> dict:
             if path.name in url_manifest:
                 metadata["source_url"] = url_manifest[path.name]
             total_chunks_written += ingest_source(
+                store=STORE_NAME,
+                registry=registry,
                 text=text,
                 source_path=rel_path,
                 source_type="html",
-                chunk_size_tokens=CHUNK_SIZE_TOKENS,
-                overlap_tokens=OVERLAP_TOKENS,
+                chunk_size_tokens=store.chunk_size_tokens,
+                overlap_tokens=store.overlap_tokens,
                 settings=settings,
                 metadata=metadata,
             )
@@ -185,11 +210,13 @@ def load_all() -> dict:
                 files_skipped += 1
                 continue
             total_chunks_written += ingest_source(
+                store=STORE_NAME,
+                registry=registry,
                 text=text,
                 source_path=rel_path,
                 source_type="markdown" if suffix == ".md" else "txt",
-                chunk_size_tokens=CHUNK_SIZE_TOKENS,
-                overlap_tokens=OVERLAP_TOKENS,
+                chunk_size_tokens=store.chunk_size_tokens,
+                overlap_tokens=store.overlap_tokens,
                 settings=settings,
                 metadata={},
             )
@@ -299,28 +326,35 @@ def prune_orphaned() -> int:
     """
     settings = load_rag_writer_settings()
 
-    # Every source_path that should exist right now, based on the folder
-    # on disk - anything in `chunks` under documents/ that isn't in this
-    # set is, by definition, orphaned.
+    # The physical table this corpus lives in, resolved through the registry.
+    # Scoping the delete to a whole TABLE is now what keeps this prune from
+    # touching another corpus's rows - the previous version had to filter on
+    # `source_path LIKE 'documents/%'` to get that isolation, because every
+    # corpus shared one table. With one table per store, this statement
+    # simply cannot see anything else.
+    registry = load_store_registry()
+    table = registry.get(STORE_NAME).table
+
+    # Every source_path that should exist right now, based on the folder on
+    # disk - anything in this store's table that isn't in this set is, by
+    # definition, orphaned.
     expected_source_paths = _expected_source_paths()
 
     engine = sa.create_engine(settings.sqlalchemy_url, poolclass=sa.pool.NullPool)
     with engine.begin() as conn:
-        # Scoped to source_path starting with "documents/" so this can
-        # never touch another corpus's rows (e.g. the social_share
-        # "social_post_metrics:%" chunks) - only this loader's own rows
-        # are ever candidates for deletion here.
-        # CAST(:expected AS text[]) explicitly - copied from the
-        # social_share prune (same lesson as retrieval.py's vector cast):
-        # without the explicit cast, Postgres can't infer what type a
-        # bound Python list should become for this comparison and refuses
-        # the query outright rather than guessing.
+        # CAST(:expected AS text[]) explicitly - copied from the social_share
+        # prune (same lesson as retrieval.py's vector cast): without the
+        # explicit cast, Postgres can't infer what type a bound Python list
+        # should become for this comparison and refuses the query outright
+        # rather than guessing.
+        #
+        # The table name, by contrast, CANNOT be a parameter - so it is
+        # quoted instead, with the same helper the setup scripts use.
         result = conn.execute(
             sa.text(
-                """
-                DELETE FROM chunks
-                WHERE source_path LIKE 'documents/%'
-                  AND source_path != ALL(CAST(:expected AS text[]))
+                f"""
+                DELETE FROM {quote_identifier(table)}
+                WHERE source_path != ALL(CAST(:expected AS text[]))
                 """
             ),
             {"expected": list(expected_source_paths)},

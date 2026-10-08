@@ -30,7 +30,7 @@ from psycopg.types.json import Jsonb
 from pgvector.psycopg import register_vector
 
 from rag.chunking import chunk_text
-from rag.config import RagWriterSettings
+from rag.config import RagWriterSettings, StoreRegistry
 from rag.embedding import embed_chunks
 from rag.upsert import upsert_returning
 
@@ -47,17 +47,26 @@ from rag.upsert import upsert_returning
 # ANY caller might reference, not just the ones being written to.
 # `created_at` is still left out - nothing in this pipeline ever reads it
 # back, unlike `id`.
-chunks_t = sa.table(
-    "chunks",
-    sa.column("id"),
-    sa.column("source_type"),
-    sa.column("source_path"),
-    sa.column("chunk_index"),
-    sa.column("chunk_text"),
-    sa.column("embedding"),
-    sa.column("metadata"),
-    sa.column("updated_at"),
-)
+#
+# Multi-store: built PER CALL now, from the physical table name the registry
+# resolved, instead of being one module-level constant aimed at a single
+# hardcoded table. Every store table has an identical shape (see schema.py's
+# _create_store_table), so this one column list is correct for all of them -
+# only the name differs. `table_name` always originates in stores.toml, never
+# from a caller.
+def _chunks_table(table_name: str) -> sa.TableClause:
+    """The lightweight table reference for one store's chunks table."""
+    return sa.table(
+        table_name,
+        sa.column("id"),
+        sa.column("source_type"),
+        sa.column("source_path"),
+        sa.column("chunk_index"),
+        sa.column("chunk_text"),
+        sa.column("embedding"),
+        sa.column("metadata"),
+        sa.column("updated_at"),
+    )
 
 # Which columns get overwritten when a chunk already exists at the same
 # (source_path, chunk_index) - i.e. a real re-ingest of changed content.
@@ -90,6 +99,8 @@ def _writer_engine(settings: RagWriterSettings) -> sa.Engine:
 
 def ingest_source(
     *,
+    store: str,
+    registry: StoreRegistry,
     text: str,
     source_path: str,
     source_type: str,
@@ -98,11 +109,23 @@ def ingest_source(
     settings: RagWriterSettings,
     metadata: dict | None = None,
 ) -> int:
-    """Chunk `text`, embed every chunk, and upsert all of them into
-    `chunks`. Returns how many rows were actually written (inserted or
-    updated - see upsert_returning's own docstring for why a row that hit
-    an unchanged conflict wouldn't count, if `update` weren't always
-    passed here, which it is).
+    """Chunk `text`, embed every chunk, and upsert all of them into the
+    chunks table belonging to `store`. Returns how many rows were actually
+    written (inserted or updated - see upsert_returning's own docstring for
+    why a row that hit an unchanged conflict wouldn't count, if `update`
+    weren't always passed here, which it is).
+
+    `store` is the LOGICAL name from rag/stores.toml (e.g. "social_share"),
+    and `registry` is the loaded registry that resolves it to a physical
+    table. The caller is a loader, which already knows which store it feeds -
+    so it says so, rather than this function trying to infer it.
+
+    Note that chunk_size_tokens/overlap_tokens are still passed IN rather
+    than read from the registry here, even though the registry holds them.
+    That is deliberate (design doc section 5.3): those two are the LOADER's
+    business, and keeping them as plain arguments leaves this function
+    generic - equally usable by anything that is not registry-driven at all,
+    such as a future importer feeding a table that has no registry entry yet.
 
     `metadata` (RAG_progress.md decision #20, "Option A"): a snapshot of
     whatever non-chunked information describes the SOURCE as a whole
@@ -164,6 +187,12 @@ def ingest_source(
         for chunk in embedded_chunks
     ]
 
+    # Resolve the logical store name to its physical table BEFORE opening the
+    # transaction. registry.get() raises UnknownStoreError for a name that is
+    # not configured - a typo in a loader should stop the run immediately,
+    # not half-way through a batch.
+    table_name = registry.get(store).table
+
     # Stage 4: one transaction, one batched upsert for the whole source -
     # `.begin()` commits automatically if this block completes without an
     # exception, and rolls back the whole thing if anything fails midway
@@ -171,7 +200,7 @@ def ingest_source(
     with _writer_engine(settings).begin() as conn:
         written = upsert_returning(
             conn,
-            chunks_t,
+            _chunks_table(table_name),
             rows,
             conflict_on=("source_path", "chunk_index"),
             update=_UPDATE_ON_CONFLICT,
