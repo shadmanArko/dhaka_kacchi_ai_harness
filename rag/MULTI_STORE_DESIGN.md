@@ -2,16 +2,110 @@
 
 | | |
 |---|---|
-| **Status** | Design agreed — **not implemented** |
-| **Date** | 2026-10-06 |
+| **Status** | ✅ **Implemented and verified — 2026-10-09.** §0 records what shipped and where it deviated |
+| **Date** | Design agreed 2026-10-06 · as-built notes added 2026-10-09 |
 | **Scope** | Extend the RAG subsystem from one vector table to N tables with per-table visibility (public / internal), enforced structurally |
-| **Decision log** | Decisions #35–#47 in `RAG_progress.md` |
-| **Supersedes** | Nothing. The existing single-table design stays valid until Phase 1 ships |
+| **Decision log** | Decisions #35–#47 (design) and #48–#57 (implementation) in `RAG_progress.md` |
+| **Supersedes** | Nothing. The single-table design it replaced was retired on 2026-10-09 (§0) |
+| **Operating instructions** | `rag/RUNBOOK.md` — setup, adding/removing a store, testing, troubleshooting |
 
-**How to read this.** §1–§4 are the *what and why* — read these to understand the
-design. §5–§9 are the *how* — the contracts, the security boundaries, the exact
-changes. §10–§15 are the *plan* — migration, phases, acceptance tests, risks. Every
-diagram is Mermaid and renders on GitHub, in VS Code and in Obsidian.
+**How to read this.** §0 is what actually shipped and where it departed from the
+plan below. §1–§4 are the *what and why* — read these to understand the design,
+and they are still accurate. §5–§9 are the *how*. §10–§15 are the *plan as it
+stood on 2026-10-06*: they are kept because the reasoning transfers, but where
+they name a store, a module or a phase they describe the plan, not the built
+system — §0 reconciles the two. Every diagram is Mermaid and renders on GitHub,
+in VS Code and in Obsidian.
+
+---
+
+## 0. As-built — what shipped, and where it deviated (2026-10-09)
+
+Design documents that get quietly rewritten to match reality stop being useful
+as design documents, so the plan below is left intact. This section is the
+reconciliation: read it before believing any specific name further down.
+
+### 0.1 What exists now
+
+| Store | Table | Tier | Source |
+|---|---|---|---|
+| `brand_book` | `chunks_brand_book` | **public** | `Knowledge_Base/public/brand-book.md` (10 chunks) |
+| `voice_and_rules` | `chunks_voice_and_rules` | **internal** | `Knowledge_Base/internal/voice-and-rules.md` (12 chunks) |
+
+Roles: `rag_writer`, `rag_public_reader`, `rag_internal_reader` — exactly the
+§6.1 model, with the internal role a member of the public one. Verified by
+`verify_stores.py` and by `stress_test.py` section 3, including §13.1's
+acceptance test (every application-level check removed, Postgres still refuses).
+
+### 0.2 Where the built system departed from the plan below
+
+1. **The store set is different from every example in this document.** §4.1's
+   diagram (`chunks_social_share` / `chunks_knowledge_base` / `chunks_hr_policies`)
+   and §5.2's registry sample are **illustrations of the shape, not the shipped
+   config**. `hr_policies` never existed. `social_share` was built, then removed
+   on 2026-10-09 (its data is a database and is queried directly instead), and
+   `knowledge_base` (the test-document corpus) was unregistered — its table and
+   files were kept as an archive. See decisions #52 and #54.
+2. **`source_dir` — a file's FOLDER decides its store, and therefore its
+   visibility.** Not in this design; added in implementation (decision #49).
+   `Knowledge_Base/public/` → the public store, `internal/` → the internal one.
+   The registry gained one field, and the consequence is the one worth having:
+   the public/internal boundary is auditable with `ls`, and moving a document
+   between tiers is a `git mv` rather than a config edit plus a re-grant.
+3. **Markdown is ingested one unit per `##` section** (decision #50),
+   extending §decisions-#26's PDF-per-page precedent: a section's heading goes
+   into `metadata.heading` and into its `source_path`
+   (`public/brand-book.md::what-we-serve`). §5.3's field table is unchanged —
+   `chunk_size_tokens`/`overlap_tokens` still belong to the loaders — but a
+   section, not a whole file, is now the unit those settings apply to.
+4. **`load_knowledge_base.py` became `load_files.py`** (§10's file table names
+   the old module). The generic loader reads whichever folder a store's
+   `source_dir` names, so adding a folder-backed store is a config edit with no
+   code change — which is what §2 goal 2 asked for, one step further than the
+   plan went.
+5. **The file-serving endpoint was a gap in this design.** `/api/file` served
+   any path under `Knowledge_Base/`, and once both tiers live in that one folder,
+   "inside the folder" stopped meaning "you may see it". It now asks the same
+   question a search does — which store owns this path, and may this credential
+   read it (`has_table_privilege`) — and returns the same 404 for "no such file",
+   "no store claims it" and "not allowed" (decision #55). This is the one place
+   where the boundary is *not* enforced by a grant, because files have no grants;
+   the check is the enforcement there.
+6. **§11's migration did not happen as written.** Both old corpora were dealt
+   with by removing or archiving them rather than by re-ingesting (decision #52
+   and #54) — so the row-copy-vs-re-ingest question it weighs became moot for
+   those two. The two brand stores were then ingested fresh, in seconds. The
+   *reasoning* in §11 still applies to any future corpus migration.
+7. **The retirement §10 predicted is done.** The legacy `chunks` table, the
+   `rag_reader` role, `load_rag_reader_settings()` and the schema helper's
+   legacy branch are all gone (decision #53), not merely marked LEGACY.
+8. **The deployment-credential risk (§14, rated Critical) is unmitigated, as
+   predicted.** `webui.py` runs with the **internal** reader credential and is
+   documented as a local operator tool; a public surface must load
+   `load_rag_public_reader_settings()` instead. The design's own mitigation —
+   "a startup log line printing which role the process connected as" — is
+   **still not built**.
+
+### 0.3 Still open from this document
+
+* **§8's discovery menu and §7's tool interface for agents** — `list_stores()`
+  already returns exactly the menu §8 describes; the tool that enumerates it is
+  Step 8 of the roadmap and is not built.
+* **§13 checklist item 6** (rename a table in the config and watch queries
+  follow, with no code change) — true by construction and covered by
+  `stress_test.py` section 3's path-resolution checks, but never demonstrated by
+  an actual rename.
+* **Per-store vector indexes** — still none, deliberately: at these row counts a
+  sequential scan is free (§5 of the runbook has the measurement).
+
+### 0.4 One risk this document did not foresee
+
+Two processes on the same machine cannot both run `bge-m3` inference — the second
+one segfaults on its first forward pass. Found by the test suite, reproduced
+deliberately, and documented for operators in `rag/RUNBOOK.md` §6.7. It does not
+change the design (the model is loaded per process by `embedding.py`), but it is
+the strongest argument yet for the "one embedding service" shape mentioned in §7
+of the runbook.
 
 ---
 
@@ -167,6 +261,11 @@ The **dotted red lines are the entire security model.** There is no code
 anywhere that enforces "public callers may not read internal stores" — there is
 simply no grant, so Postgres refuses.
 
+> ⤷ **As built (2026-10-09):** the *security model this diagram shows* is exactly
+> what shipped and is verified by `stress_test.py` §3. The **store names are
+> illustrative, not the shipped set** — the real pair is `chunks_brand_book`
+> (public) and `chunks_voice_and_rules` (internal). See §0.1–§0.2.
+
 ### 4.2 Component map
 
 ```mermaid
@@ -237,6 +336,14 @@ chunk_size_tokens  = 250
 overlap_tokens     = 50
 description        = "Internal HR policy: staff handbook, shift rules, leave and disciplinary procedures."
 ```
+
+> ⤷ **As built (2026-10-09):** this block shows the *shape*, with three
+> illustrative stores. The shipped registry has two — `brand_book` (public) and
+> `voice_and_rules` (internal) — plus a sixth field the design did not have:
+> **`source_dir`**, the folder under `Knowledge_Base/` a store's files come from.
+> Visibility follows the folder, so `public/` and `internal/` are the whole
+> boundary and a config edit is not needed to move a document between tiers
+> (§0.2, decisions #49–#50).
 
 ### 5.3 Field by field
 
@@ -567,6 +674,7 @@ the verifier exists to catch exactly that drift.
 | `rag/schema.py` | Create N tables from the registry instead of one `chunks`; grant per table by `visibility`; keep drop-then-add CHECK convergence per table. | M |
 | `rag/bootstrap_db.py` | Create `rag_public_reader` / `rag_internal_reader` (+ membership) instead of `rag_reader`. Print all generated passwords. | S |
 | `rag/ingest.py` | `chunks_t` becomes a per-store table reference from the registry. `ingest_source()` gains a `store` parameter. | S–M |
+| ⤷ *as built* | Every row above landed, with two changes: `load_knowledge_base.py` was replaced by the generic **`load_files.py`** (one loader for any folder-backed store, so no new module is needed per store), and `schema.py` / `bootstrap_db.py` lost their legacy branches entirely once the old table and role were retired (§0.2). `webui.py` also gained a visibility check on `/api/file`, which this table did not anticipate. | — |
 | `rag/retrieval.py` | The three SQL strings become templates on the resolved table name. `retrieve()` / `get_chunk_neighbors()` gain `store`. Add `list_stores()`. | M |
 | `rag/load_social_share.py` | Read chunk settings from the registry instead of module constants. Pass its store name. | S |
 | `rag/load_knowledge_base.py` | Same. Its prune's `LIKE 'documents/%'` scoping stays, now implicit per table. | S |
@@ -581,6 +689,16 @@ large; the heavy cost is wall-clock (§11), not development.
 ---
 
 ## 11. Migrating the existing data
+
+> ⤷ **As built (2026-10-09): this section's question became moot and the
+> migration went another way.** Both corpora it weighs (the social posts and the
+> test documents) were *removed from RAG rather than migrated* — the first
+> because its data is a database that gets queried directly, the second because
+> it was test material whose table was kept as an unregistered archive
+> (decisions #52, #54). The brand stores were then ingested fresh, which takes
+> seconds, and the old `chunks` table was dropped. The comparison below is kept
+> because the reasoning applies to any future corpus migration, not because it
+> describes what happened.
 
 The live `chunks` table holds 3,304 rows from **two** corpora, so it cannot
 simply be renamed — it has to become two tables.
@@ -618,6 +736,13 @@ session as a fallback, then dropped).
 ---
 
 ## 12. Development phases
+
+> ⤷ **As built (2026-10-09): phases 1–5 and 7 shipped on 2026-10-07, phase 6
+> finished on 2026-10-09** — but phase 6 was "remove the old corpora, ingest the
+> new ones, drop the legacy table", not the re-ingest §11 describes (§0.2).
+> The phasing itself earned its keep: the roles, grants and isolation landed and
+> were proven before any content depended on them, which is exactly what made
+> §13's acceptance test pass on the first honest run.
 
 Each phase ends at a **working state** — the system is never half-migrated across
 a phase boundary. Phases 1–3 change no behaviour a caller can see, deliberately:
@@ -673,6 +798,11 @@ flowchart TD
     style F fill:#8b2e2e,color:#fff
 ```
 
+> ⤷ **As built (2026-10-09):** the test above was run for real, and it is
+> automated — `stress_test.py` §3c holds both halves of it permanently (the
+> refusal *and* the control that the same role can read a public table, which is
+> what proves the refusal is a grant decision rather than a broken credential).
+
 ### 13.2 Checklist
 
 | # | Check | Proves |
@@ -688,6 +818,28 @@ flowchart TD
 
 Check 7 is the one most likely to be skipped, and the one that keeps the config
 honest over time.
+
+> ⤷ **As built (2026-10-09):** checks 1–5 and 7–8 are executed and passing —
+> 1/2/4/5 as `list_stores()` and `stress_test.py` §3, 3 as §3c, and 8 by
+> `stress_test.py` §1 (row counts, one embedding width, every `source_path`
+> under the store's own folder).
+>
+> **Check 7 was run in both directions on 2026-10-09**, and it is worth knowing
+> what each failure looks like, because they are not symmetrical:
+>
+> | planted drift | `verify_stores` says |
+> |---|---|
+> | the internal store *mis-declared* as `public`, grants unchanged | `declared visibility 'public', but rag_public_reader has NO SELECT` |
+> | a real `GRANT SELECT … TO rag_public_reader` on the internal table | `declared visibility 'internal', but rag_public_reader CAN read … - **INTERNAL DATA IS EXPOSED**` |
+>
+> The second is the one that matters, and the only way to see it is to actually
+> grant the thing — which is what the check is for. (The grant was revoked
+> immediately afterwards, in a `finally`; the config verifies clean again.)
+>
+> **Check 6 was never demonstrated with an actual rename** — the indirection is
+> exercised (a path resolves to its owning store), but nobody has edited a
+> `table` value and re-run a query to watch it follow. Worth doing once, the next
+> time a rename is tempting anyway.
 
 ---
 

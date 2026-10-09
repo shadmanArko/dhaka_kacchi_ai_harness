@@ -21,16 +21,24 @@ against a real database. The exact things that are *not* built yet (there are
 three) are listed explicitly in §2.6 — nothing in this document claims a feature
 that isn't there.
 
-> **Update — 2026-10-09.** The subsystem moved from one vector table to two
-> (one per audience: `brand_book` public, `voice_and_rules` internal), with the
-> public/internal boundary enforced by Postgres grants rather than by code.
-> Parts 1, 3 and 5 of this guide still describe how everything works — chunking,
-> embedding, hybrid retrieval and RRF are unchanged — but wherever it says
-> "the `chunks` table" read "one table per store", and for the current store
-> list, the setup commands and the operating procedures use **`rag/RUNBOOK.md`**
-> (which is current) plus `rag/MULTI_STORE_DESIGN.md` (the design). Part 4's
-> setup steps are superseded by the runbook's §2. Part 2 is the historical
-> design as of 2026-10-06, kept because the reasoning still holds.
+> **Update — 2026-10-09.** This guide describes the subsystem as it stood on
+> **2026-10-06**, before the multi-store change landed. It is kept because
+> Parts 1 and 5 (what RAG is; the glossary) are timeless, and because Part 3's
+> account of *why* each phase is built the way it is remains true — but the
+> following are no longer accurate, and **`rag/RUNBOOK.md` is the current
+> document** for all of them:
+>
+> | This guide says | The system now |
+> |---|---|
+> | one vector table, `chunks` | **one table per store**: `chunks_brand_book`, `chunks_voice_and_rules` (the legacy `chunks` table was dropped on 2026-10-09) |
+> | four roles, including `rag_reader` | **three** — `rag_writer`, `rag_public_reader`, `rag_internal_reader`; `rag_reader` and `RAG_READER_DATABASE_URL` are retired (Part 3's role diagram, and the `.env` block in Part 4, still show four) |
+> | `load_knowledge_base.py` ingests documents | **`load_files.py`** — one generic loader for any store's folder, and markdown is now chunked per `##` section, not per file |
+> | the corpora are the social posts + the test documents | both were **removed from RAG** on 2026-10-09 (the first is queried as a database, the second kept as an unregistered archive); the live stores are the brand book and the voice/rules pair |
+> | Part 4: manual setup from scratch | superseded by **`RUNBOOK.md` §2**, which is also shell-explicit (Linux · macOS · Windows) |
+>
+> `MULTI_STORE_DESIGN.md` §0 lists every deviation between the design and the
+> built system, in one place. Part 2 of this guide is the historical design and
+> is left as written.
 
 ---
 
@@ -312,6 +320,15 @@ because it exercises two entirely different content shapes.
 
 **Total: 3,304 chunks** in the live store.
 
+> ⚠️ **That was 2026-10-02.** As of **2026-10-09 the live store holds 22 chunks**
+> across two brand stores — `brand_book` (10) and `voice_and_rules` (12) — with
+> the two corpora described below removed from RAG: the social corpus because
+> its data is a database and gets queried directly, the documents corpus because
+> it was test material (its table survives, unregistered, as an archive). The
+> *lessons* in this section — per-page PDF chunking, the metadata snapshot, why
+> pgvector rather than a dedicated store — all still hold; the corpus list and
+> the counts do not. See `RUNBOOK.md` §1 and `MULTI_STORE_DESIGN.md` §0.
+
 Two details worth noticing in that table, because they're the kind of thing that
 looks trivial and isn't:
 
@@ -373,6 +390,13 @@ exactly the rights its job needs:
 | `postgres` (admin, via `RAG_ADMIN_DATABASE_URL`) | One-time setup only | Superuser. Never used at runtime by ingestion or agent code. |
 | `rag_writer` | The recurring ingestion job | `SELECT, INSERT, UPDATE, DELETE` on `chunks`. No DDL at all, no other table. |
 | `rag_reader` | Agent/query code | `SELECT` only. Structurally incapable of modifying a row. |
+
+> ⚠️ **Superseded 2026-10-09.** The roles are now **three**, split by *audience*
+> rather than by direction of travel: `rag_writer`, `rag_public_reader` (public
+> stores only) and `rag_internal_reader` (everything, a member of the public
+> role). `rag_reader` is retired along with the single `chunks` table it read.
+> The two reasons below are unchanged and are why the split is shaped this way.
+> Current table: `RUNBOOK.md` §1.
 
 Two reasons for the split, both load-bearing:
 
@@ -533,8 +557,12 @@ deliberate deferral, not an oversight.
 │   │     └── table chunks (id, source_type, source_path,             │  │
 │   │         chunk_index, chunk_text, embedding vector(1024),        │  │
 │   │         metadata jsonb, created_at, updated_at)                 │  │
+│   │         ⚠️ 2026-10-09: now ONE TABLE PER STORE, same columns -  │  │
+│   │            chunks_brand_book, chunks_voice_and_rules            │  │
 │   │                                                                 │  │
 │   │   roles: postgres (admin) · rag_writer · rag_reader             │  │
+│   │          ⚠️ 2026-10-09: rag_reader retired; the readers are now │  │
+│   │             rag_public_reader + rag_internal_reader             │  │
 │   └─────────────────────────────────────────────────────────────────┘  │
 └────────────────────────────────────────────────────────────────────────┘
 ```
@@ -955,6 +983,14 @@ chunking's overlap already made adjacent chunks share boundary content.
 `retrieve()` connects with `rag_reader` and issues only `SELECT`s. It is not
 *policy* that stops it writing — the role has no write grants at all.
 
+> ⚠️ **Superseded 2026-10-09.** The principle is unchanged; the role is not.
+> `retrieve()` connects with whichever reader credential the caller loaded —
+> `rag_public_reader` or `rag_internal_reader` — and both hold `SELECT` and
+> nothing else. What has been added on top of "cannot write" is "cannot read
+> what it should not": the public role is granted the public store and simply
+> never mentioned in the internal one, so the same query fails inside Postgres.
+> `stress_test.py` §3c proves it by deleting every application-level check.
+
 ## Phase 6 — Presentation: the web UI
 
 **Implemented in:** `webui.py` — FastAPI + uvicorn, pure retrieval, **no LLM
@@ -988,6 +1024,15 @@ Design points:
   reference, and the score. Search results are for scanning; detail is opt-in.
 
 ## Phase 7 — Re-index orchestration
+
+> ⚠️ **Superseded 2026-10-09.** The orchestration and the load-before-prune order
+> are unchanged, but it is now **registry-driven**: `reindex.py` walks
+> `stores.toml` and calls `load_store(store)` / `prune_orphaned(store)` on
+> whichever loader a store is mapped to. The two hardcoded corpora in the
+> diagram below became two brand stores (the social corpus was removed from RAG,
+> its data being a database), and `load_knowledge_base.py` is now the generic
+> `load_files.py`. One consequence worth knowing: a re-index of the current
+> stores takes **seconds**, where the corpora in this diagram took ~45 minutes.
 
 **Purpose:** one action that brings the whole vector store into agreement with
 what's on disk.
@@ -1143,6 +1188,13 @@ docker update --restart unless-stopped dhaka-kacchi-rag
 ```
 
 ### Step 3 — Create `.env`
+
+> ⚠️ **Superseded 2026-10-09 — this whole Part 4 is history.** It describes
+> setting up the pre-multi-store system (one table, four roles, both old
+> corpora). For a machine you are setting up **now**, follow `RUNBOOK.md` §2,
+> which is six steps, current, and gives every command for both PowerShell and
+> POSIX shells. Everything below still *works* if followed exactly — it just
+> builds the 2026-10-06 system, not this one.
 
 Create a file named **`.env`** in the repository root (next to
 `pyproject.toml`). It is git-ignored and holds all three connection strings:
@@ -1349,23 +1401,34 @@ Appendix B for the deployment discussion.
 
 # Appendix A — File-by-file map
 
+> **Updated 2026-10-09** to the current file set. (The previous version listed
+> `load_knowledge_base.py` — now `load_files.py` — and described `schema.py` as
+> creating one `chunks` table for both corpora.)
+
 | File | Role |
 |---|---|
-| `rag/config.py` | The only module that reads environment variables. Three validated, fail-fast settings loaders — one per database role. |
-| `rag/bootstrap_db.py` | One-time: create database, `vector` extension, and the two roles. Prints generated passwords once. |
-| `rag/schema.py` | One-time: create the `chunks` table and apply grants. Idempotent; converges the `source_type` CHECK. |
+| `rag/stores.toml` | **The registry**: which stores exist, their table, visibility tier, source folder and chunk settings. The file you edit to add a store. |
+| `rag/config.py` | The only module that reads environment variables. Four validated, fail-fast settings loaders (admin, writer, public reader, internal reader) + the registry loader. |
+| `rag/bootstrap_db.py` | One-time: create database, `vector` extension, the three roles (and the internal→public membership). Prints generated passwords once. |
+| `rag/schema.py` | One-time: create one table **per store** in the registry, and grant by visibility tier. Idempotent; converges each `source_type` CHECK. |
 | `rag/chunking.py` | Token-measured, overlapping, word-boundary-safe splitting. Format-agnostic. |
 | `rag/embedding.py` | `embed_texts` (generic, batched) and `embed_chunks` (ingestion wrapper). |
 | `rag/upsert.py` | Generic `INSERT ... ON CONFLICT DO UPDATE ... RETURNING` helper. |
-| `rag/ingest.py` | `ingest_source()`: chunk → embed → upsert, one transaction. |
-| `rag/load_social_share.py` | CSV corpus loader + orphan prune. |
-| `rag/load_knowledge_base.py` | Document folder loader (PDF per page, HTML, TXT/MD) + orphan prune. |
-| `rag/reindex.py` | Orchestrates load + prune for both corpora; returns a stats dict. |
-| `rag/retrieval.py` | `retrieve()` (hybrid dense + keyword, RRF) and `get_chunk_neighbors()`. |
-| `rag/webui.py` | FastAPI app: search UI, file serving, re-index button + status polling. |
-| `rag/RAG_progress.md` | The authoritative decision log — 34 numbered decisions with the reasoning at the time, including superseded ones. |
-| `rag/data/social_post_metrics.csv` | Corpus A source. |
-| `rag/Knowledge_Base/documents/` | Corpus B source (flat folder). |
+| `rag/ingest.py` | `ingest_source()`: chunk → embed → upsert, one transaction, into a named store. |
+| `rag/load_files.py` | The generic folder loader: markdown per `##` section (heading in metadata + `source_path`), PDF per page, HTML, TXT; plus its orphan prune. |
+| `rag/load_social_share.py` | The CSV loader, kept runnable but **currently unregistered** (its store was removed 2026-10-09; re-registering is one TOML block). |
+| `rag/reindex.py` | Walks the registry, load + prune per store; returns a stats dict. |
+| `rag/retrieval.py` | `retrieve()` (hybrid dense + keyword, RRF), `get_chunk_neighbors()`, `list_stores()`, and the store/credential checks. |
+| `rag/verify_stores.py` | Checks `stores.toml` against the real grants; reports unregistered tables. |
+| `rag/stress_test.py` | The six-section test suite (+ opt-in `--scale`) described in the runbook §5. |
+| `rag/webui.py` | FastAPI app: search UI, store picker, file serving (visibility-gated), re-index button + status polling. |
+| `rag/RUNBOOK.md` | **The current operating document** — setup, adding/removing a store, testing, troubleshooting, DB GUIs. |
+| `rag/MULTI_STORE_DESIGN.md` | The multi-store design, with an as-built section (§0) recording every deviation. |
+| `rag/RAG_progress.md` | The authoritative decision log — numbered decisions with the reasoning at the time, including superseded ones. |
+| `rag/Knowledge_Base/public/` · `internal/` | The two live corpora. Folder = visibility. |
+| `rag/Knowledge_Base/facts.yaml` | Live values (prices, deadlines) that must **not** be embedded — §6.4 of the runbook. |
+| `rag/Knowledge_Base/documents/` | The test corpus, kept on disk but unregistered (an archive). |
+| `rag/data/social_post_metrics.csv` | The CSV export that fed the removed social store; kept so it can be restored. |
 
 ---
 
@@ -1373,6 +1436,22 @@ Appendix B for the deployment discussion.
 
 Recorded honestly, because a document that only lists strengths is not an
 engineering document.
+
+> **Added 2026-10-09 — the most consequential one found since.** Numbering below
+> is the original; this one is new and belongs at the top.
+
+**0. Two processes cannot both run `bge-m3` inference on this machine — the
+second one segfaults** (exit 139, on its first forward pass, no traceback).
+Narrowed by direct experiment: the crash needs another process that has loaded
+the model **and already run an embedding**; a second process is fine if the
+other has only loaded it, and fine if nothing else is running. Not memory (14 GB
+free), not thread count, not specific to the web server; the mechanism is not
+established. Crashed 7/7 with a competing process, passed every run without one.
+**Consequence:** run one model-using process at a time — stop the web UI before
+`rag.reindex` / `rag.stress_test` from a terminal (the UI's own re-index button
+is safe: same process). Full write-up in `RUNBOOK.md` §6.7. **The real fix** is
+a single embedding service that every caller talks to, instead of each process
+loading its own 4.3 GB copy.
 
 **1. The local Postgres container crashes under heavy ingestion load.**
 Observed twice: the container exits silently (`Exited (255)`, no fatal error in
@@ -1392,7 +1471,11 @@ stated principle of not adding operational surface — recorded as a trade-off t
 weigh before this moves to permanent infrastructure, not as a settled question.
 
 **3. No vector index.** Every similarity query is a sequential scan. Correct and
-fast at 3,304 rows; the thing to fix when latency becomes visible.
+fast at these sizes — *measured* 2026-10-09 rather than assumed: at 156 rows the
+plan is `Seq Scan … cost=0.00..27.95`, i.e. scanning the entire store costs
+nothing next to embedding the query (~420 ms p50, almost all of it the model).
+The thing to fix when the store grows by orders of magnitude, not before
+(`RUNBOOK.md` §5.2, `stress_test.py --scale`).
 
 **4. No connection timeouts.** If the database dies, an in-flight HTTP request
 can hang indefinitely rather than failing fast. A real production-readiness gap,
