@@ -16,7 +16,7 @@ SEED_REV    := 0012
         ingest-facebook ingest-facebook-dry-run \
         ingest-threads ingest-threads-dry-run \
         run-detectors refresh-social-share \
-        current history sql psql revision lint fmt
+        current history sql psql revision lint fmt rag-verify rag-test rag-test-full rag-schema rag-reindex rag-ui
 
 help:  ## show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -142,3 +142,25 @@ lint:  ## ruff check + format check
 
 fmt:  ## ruff format
 	$(UV) run ruff format .
+
+# ---------------------------------------------------------------------------
+# RAG subsystem (rag/) - setup, stores, tests: see rag/RUNBOOK.md
+# ---------------------------------------------------------------------------
+
+rag-verify:  ## RAG: check stores.toml against the real Postgres grants
+	$(PY) -m rag.verify_stores
+
+rag-test:  ## RAG: fast test suite (content, retrieval, isolation, robustness)
+	$(PY) -m rag.stress_test --quick
+
+rag-test-full:  ## RAG: full suite, including the write + concurrent-load sections
+	$(PY) -m rag.stress_test
+
+rag-schema:  ## RAG: create/refresh store tables and grants from stores.toml
+	$(PY) -m rag.schema
+
+rag-reindex:  ## RAG: re-embed every store from the files on disk
+	$(PY) -m rag.reindex
+
+rag-ui:  ## RAG: serve the local search page on http://127.0.0.1:8010
+	$(UV) run uvicorn rag.webui:app --port 8010 --host 127.0.0.1

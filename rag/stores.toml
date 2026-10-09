@@ -10,7 +10,8 @@
 # win and `rag/verify_stores.py` reports the drift.
 #
 # Adding a store = add a block below, create its table (schema.py), and grant
-# the right roles. No Python changes are required.
+# the right roles. No Python changes are required. Step by step, with the
+# commands: rag/RUNBOOK.md.
 #
 # Each value's meaning:
 #   table              - the PHYSICAL table name in dhaka_kacchi_rag. Never
@@ -18,6 +19,15 @@
 #                        logical name (the [stores.<name>] key).
 #   visibility         - "public" or "internal". A declaration of intent,
 #                        checked against the real grants by verify_stores.py.
+#                        A public store is readable by a customer-facing
+#                        process; an internal one never is.
+#   source_dir         - WHICH FOLDER under rag/Knowledge_Base/ this store's
+#                        content comes from. Optional: a store fed from
+#                        somewhere other than a folder (or populated by hand)
+#                        simply omits it. The folder is what decides a file's
+#                        store - and therefore its visibility - so moving a
+#                        file between folders changes who can read it, with no
+#                        config edit and no code change.
 #   chunk_size_tokens  - how big each chunk should be, measured in the
 #                        embedding model's own tokens. Used ONLY by the
 #                        loaders at ingestion time.
@@ -30,25 +40,74 @@
 #                        should answer "what kinds of questions does this
 #                        store hold the answer to?"
 
-# The company's own social media posts: public-facing marketing content that
-# was literally published to the world, so a customer-facing chatbot may read
-# it. Chunk settings tuned in RAG_progress.md decision #18 against the real
-# token-count distribution of these captions (median 38 tokens, p75 103).
-[stores.social_share]
-table              = "chunks_social_share"
+# The customer-facing brand knowledge: who the business is, its story, what it
+# serves, how ordering works, and the answers to the questions customers
+# actually ask. Everything in it was either published publicly already or is
+# written to be said to a customer - which is why this is the PUBLIC store: a
+# customer-facing chatbot holds a credential that can read this and nothing
+# else.
+#
+# Chunk settings: 300/60 tokens. Measured against the real file (bge-m3
+# tokens), the brand book's sections run 60-400 tokens each with a median
+# around 190 - so with the loader's per-section splitting (load_files.py),
+# most sections become exactly one chunk, and only the two long ones (the
+# FAQ and the legal table) split further. Overlap is 20% of the chunk size,
+# the same ratio the other stores use.
+[stores.brand_book]
+table              = "chunks_brand_book"
 visibility         = "public"
-chunk_size_tokens  = 100
-overlap_tokens     = 20
-description        = "The restaurant's own social media posts: menu item highlights, promotions, and the story behind the kacchi box. Use this for questions about what we sell, what we promote, and how we talk about our food publicly."
+source_dir         = "public"
+chunk_size_tokens  = 300
+overlap_tokens     = 60
+description        = "Customer-facing brand knowledge for Dhaka Kacchi Berlin: what the restaurant is, the founder's story, what it serves (kacchi biryani, Borhani, chutney), how ordering and delivery work, and answers to common customer questions. Safe to show to customers. For anything with a number in it - prices, deadlines, delivery fees, the pickup point - use the live facts lookup instead; those change and this store would be out of date."
 
-# Technical and legal reference documents kept for internal use: machine
-# learning research papers and SEC contract exhibits. These are internal
-# reference material - a customer-facing chatbot must never surface them.
-# Chunk settings from RAG_progress.md decision #27, measured against the real
-# documents (median 1079 tokens per page, far denser than social captions).
-[stores.knowledge_base]
-table              = "chunks_knowledge_base"
+# The internal half of the brand brain: how the brand sounds, which words to
+# use and avoid, how to speak to each audience, which subjects are sensitive,
+# and the German advertising-law rules that past posts have broken. This is
+# written FOR the business's own content agents and checkers, and some of it
+# (the list of past legal mistakes, the wording that must never be used) is
+# exactly the kind of thing a customer must never see - which is why it is
+# INTERNAL: a customer-facing credential cannot read this table at all.
+#
+# Same 300/60 settings, for the same reason: this file's sections are the same
+# size and the same shape as the brand book's.
+[stores.voice_and_rules]
+table              = "chunks_voice_and_rules"
 visibility         = "internal"
-chunk_size_tokens  = 250
-overlap_tokens     = 50
-description        = "Internal reference library: machine-learning research papers (attention mechanisms, transformers, image models) and legal contract exhibits. Use this for technical or contractual questions about the underlying methods and agreements."
+source_dir         = "internal"
+chunk_size_tokens  = 300
+overlap_tokens     = 60
+description        = "Internal rules and voice for Dhaka Kacchi Berlin's own content agents: how the brand sounds, words to use and avoid, language and greeting policy per audience, sensitive-topic rules, German advertising-law constraints (UWG, PAngV, health claims), and the mistakes found in past posts. Use this before writing or reviewing any public-facing text. Internal only - never quote it to a customer."
+
+# ---------------------------------------------------------------------------
+# Removed stores (kept here as a record of what used to exist and why it went)
+# ---------------------------------------------------------------------------
+#
+# [stores.social_share]  - table chunks_social_share, public.
+#   Removed 2026-10-09, on instruction: this corpus is a database
+#   (social_post_metrics), and the agent queries it directly instead. SQL
+#   answers "how many likes did the Eid posts get" exactly; a vector search
+#   over captions can only ever answer it approximately. Re-adding the block
+#   above plus the one line in reindex.py's _LOADER_MODULES restores it -
+#   load_social_share.py is still present and still works. The table itself
+#   was dropped; re-ingesting it takes a few minutes from the CSV still at
+#   rag/data/social_post_metrics.csv.
+#
+# [stores.knowledge_base] - table chunks_knowledge_base, internal.
+#   Removed 2026-10-09: it held the test corpus (5 arXiv papers, 41 SEC
+#   contract exhibits) that was used to build and prove the file-ingestion
+#   path. Its TABLE AND ITS FILES WERE NOT DELETED - rag/Knowledge_Base/
+#   documents/ and chunks_knowledge_base (2,721 rows) are both still there,
+#   simply unregistered, so the data is not lost and re-registering is one
+#   block:
+#
+#     [stores.knowledge_base]
+#     table              = "chunks_knowledge_base"
+#     visibility         = "internal"
+#     source_dir         = "documents"
+#     chunk_size_tokens  = 250
+#     overlap_tokens     = 50
+#     description        = "Internal reference library: machine-learning research papers and legal contract exhibits."
+#
+#   verify_stores.py reports any table in the database that no store claims,
+#   so this does not silently rot.

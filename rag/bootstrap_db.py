@@ -64,11 +64,12 @@ RAG_WRITER_ROLE = "rag_writer"
 RAG_PUBLIC_READER_ROLE = "rag_public_reader"
 RAG_INTERNAL_READER_ROLE = "rag_internal_reader"
 
-# LEGACY: the single reader role from before the multi-store design. It can
-# read the original `chunks` table and nothing else. Kept only so the
-# existing system keeps working during the migration - once the old `chunks`
-# table is dropped (design doc phase 6), this role is retired too.
-RAG_READER_ROLE = "rag_reader"
+# RETIRED 2026-10-09: `rag_reader`, the single reader role from before the
+# multi-store design. It could read the original `chunks` table and nothing
+# else, and both went together. A database that predates that date may still
+# have the role (and `RAG_READER_DATABASE_URL` in its .env) hanging around;
+# rag/RUNBOOK.md has the two commands that remove it. New setups never create
+# it - this script is the only thing that ever did.
 
 # The Postgres error code ("SQLSTATE") for "you tried to create something
 # that already exists" - Postgres assigns a stable 5-character code to
@@ -291,7 +292,7 @@ def create_roles(settings: RagAdminSettings) -> int:
     the plaintext) - if this output is lost, the only fix is resetting the
     password with ALTER ROLE, not recovering the original.
 
-    Four roles, deliberately NOT one per table: a role answers "who is
+    Three roles, deliberately NOT one per table: a role answers "who is
     asking", never "what are they asking for" (see the role constants'
     comment at the top of this file, and rag/MULTI_STORE_DESIGN.md section
     6). WHICH tables each reader may actually see is decided later, by the
@@ -310,11 +311,6 @@ def create_roles(settings: RagAdminSettings) -> int:
         # The two reader identities introduced by the multi-store design.
         public_password = _create_role_if_absent(conn, RAG_PUBLIC_READER_ROLE)
         internal_password = _create_role_if_absent(conn, RAG_INTERNAL_READER_ROLE)
-
-        # LEGACY: the original single reader role, kept only while the old
-        # `chunks` table is still in use. Retired together with that table
-        # once the migration finishes (design doc phase 6).
-        reader_password = _create_role_if_absent(conn, RAG_READER_ROLE)
 
         # Make the internal reader a MEMBER of the public reader. From here
         # on, every grant made to the public role is automatically inherited
@@ -338,7 +334,7 @@ def create_roles(settings: RagAdminSettings) -> int:
     # Print any freshly generated passwords together, clearly labelled, at
     # the very end - easier to find and copy than if they were scattered
     # between the individual "created role" lines above.
-    if writer_password or public_password or internal_password or reader_password:
+    if writer_password or public_password or internal_password:
         print()
         print("=== SAVE THESE NOW - shown only this once ===")
         if writer_password:
@@ -347,8 +343,6 @@ def create_roles(settings: RagAdminSettings) -> int:
             print(f"  {RAG_PUBLIC_READER_ROLE} password: {public_password}")
         if internal_password:
             print(f"  {RAG_INTERNAL_READER_ROLE} password: {internal_password}")
-        if reader_password:
-            print(f"  {RAG_READER_ROLE} (legacy) password: {reader_password}")
         print("Copy these into .env as part of RAG_WRITER_DATABASE_URL,")
         print("RAG_PUBLIC_READER_DATABASE_URL and RAG_INTERNAL_READER_DATABASE_URL.")
         print("===============================================")

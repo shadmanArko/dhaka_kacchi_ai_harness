@@ -1,6 +1,14 @@
 """Load the real social_share corpus (social_post_metrics.caption) into
 dhaka_kacchi_rag.
 
+⚠️ CURRENTLY UNREGISTERED (2026-10-09). There is no [stores.social_share]
+block in rag/stores.toml any more: the decision was that this data is queried
+directly (it is a database, and SQL answers "how many likes did the Eid posts
+get" exactly, where a vector search can only ever answer it approximately).
+This module is kept, intact and runnable, as the path back: re-adding the
+store block to stores.toml and its one line to reindex.py's _LOADER_MODULES is
+the whole restore. See rag/RUNBOOK.md, "Removing a store".
+
 Reads the CSV export at rag/data/social_post_metrics.csv (produced by a
 one-off export over the SSH tunnel to social_share - see
 RAG_progress.md's "RESOLVED" entry for how that export was done) and
@@ -36,7 +44,13 @@ from rag.bootstrap_db import quote_identifier
 # load_store_registry is how this loader finds out which table to write to
 # and how big its chunks should be - both now live in rag/stores.toml rather
 # than as constants in this file.
-from rag.config import ConfigError, load_rag_writer_settings, load_store_registry
+from rag.config import (
+    ConfigError,
+    Store,
+    StoreRegistry,
+    load_rag_writer_settings,
+    load_store_registry,
+)
 from rag.ingest import ingest_source
 
 # Where the exported CSV lives - see rag/data/'s own .gitignore entry
@@ -44,13 +58,16 @@ from rag.ingest import ingest_source
 # text, not synthetic test data.
 CSV_PATH = Path(__file__).resolve().parent / "data" / "social_post_metrics.csv"
 
-# The LOGICAL store name this loader feeds, exactly as registered in
-# rag/stores.toml.
+# The LOGICAL store name this loader feeds. Unlike load_files.py, this loader
+# is tied to one corpus (one CSV, one store), so it keeps its own default name
+# rather than taking one from the registry's source_dir - but it is still
+# passed in as a Store by its caller, so both loaders have the same shape and
+# reindex.py can call either one identically.
 #
 # The chunk settings that used to sit here as module constants (100/20,
 # RAG_progress.md decision #18 - tuned against this corpus's real token-count
-# distribution, median 38 tokens and p75 103) now live in that file, beside
-# the store they describe. Two consequences worth having: retuning this
+# distribution, median 38 tokens and p75 103) now live in rag/stores.toml,
+# beside the store they describe. Two consequences worth having: retuning this
 # corpus is a config edit rather than a code change, and the loader and the
 # retriever can no longer drift apart about which store is which.
 STORE_NAME = "social_share"
@@ -97,11 +114,16 @@ def _build_metadata(row: dict[str, str]) -> dict:
     }
 
 
-def load_all() -> dict:
-    """Ingest every post with a real caption from CSV_PATH. Returns a
-    stats dict (posts_ingested, posts_skipped_empty, total_chunks_written)
-    - returned as data, not just printed, so rag/reindex.py can call this
-    and report the numbers back through the web UI, not only the CLI.
+def load_store(store: Store, *, registry: StoreRegistry | None = None) -> dict:
+    """Ingest every post with a real caption from CSV_PATH into `store`'s
+    table. Returns a stats dict (posts_ingested, posts_skipped_empty,
+    total_chunks_written) - returned as data, not just printed, so
+    rag/reindex.py can call this and report the numbers back through the web
+    UI, not only the CLI.
+
+    The `store` argument and the optional `registry` are the same shape
+    load_files.load_store() takes, so the orchestrator can drive either loader
+    without knowing which kind of store it is looking at.
 
     Safe to re-run: ingest_source() is already upsert-based per post
     (RAG_progress.md decisions #14/#15), so re-running this loader against
@@ -110,12 +132,12 @@ def load_all() -> dict:
     """
     settings = load_rag_writer_settings()
 
-    # Look this corpus up in the registry once, up front: it tells us which
-    # physical table to write to and how big this corpus's chunks should be.
-    # Resolving it here rather than per row means a misconfigured store name
-    # fails immediately, before any embedding work has been done.
-    registry = load_store_registry()
-    store = registry.get(STORE_NAME)
+    # The registry is what resolves the logical store name to a physical table
+    # inside ingest_source(). Loaded here when the caller did not already have
+    # one, so a misconfigured registry fails immediately - before any
+    # embedding work has been done.
+    if registry is None:
+        registry = load_store_registry()
 
     with CSV_PATH.open(encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
@@ -132,7 +154,7 @@ def load_all() -> dict:
         written = ingest_source(
             # Which store this belongs to - resolved to a table by
             # ingest_source() through the same registry.
-            store=STORE_NAME,
+            store=store.name,
             registry=registry,
             text=row["caption"],
             source_path=f"social_post_metrics:{row['id']}",
@@ -154,7 +176,7 @@ def load_all() -> dict:
     }
 
 
-def prune_orphaned() -> int:
+def prune_orphaned(store: Store) -> int:
     """Delete any chunk whose post no longer exists in CSV_PATH with a
     real caption - i.e. the post was deleted from social_share (and the
     CSV was re-exported without it), or its caption was cleared.
@@ -178,8 +200,7 @@ def prune_orphaned() -> int:
     # `source_path LIKE 'social_post_metrics:%'` to get the same isolation,
     # because every corpus shared one table. With one table per store, that
     # filter is unnecessary: this statement simply cannot see anything else.
-    registry = load_store_registry()
-    table = registry.get(STORE_NAME).table
+    table = store.table
 
     with CSV_PATH.open(encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
@@ -215,17 +236,25 @@ def prune_orphaned() -> int:
 
 
 def main() -> int:
+    """Terminal entry point: `uv run python -m rag.load_social_share`.
+
+    Requires the store to be REGISTERED (see this module's docstring - it is
+    not, as of 2026-10-09), because everything downstream resolves it through
+    rag/stores.toml.
+    """
     try:
-        stats = load_all()
-    except ConfigError as exc:
-        print(f"config error: {exc}", file=sys.stderr)
+        registry = load_store_registry()
+        store = registry.get(STORE_NAME)
+        stats = load_store(store, registry=registry)
+    except (ConfigError, LookupError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 2
 
     print(f"posts with a real caption: {stats['posts_ingested']}")
     print(f"posts skipped (empty/NULL caption): {stats['posts_skipped_empty']}")
     print(f"total chunk rows written: {stats['total_chunks_written']}")
 
-    deleted = prune_orphaned()
+    deleted = prune_orphaned(store)
     print(f"orphaned chunks deleted: {deleted}")
     return 0
 

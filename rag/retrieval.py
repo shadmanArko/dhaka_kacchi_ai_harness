@@ -303,6 +303,62 @@ def _resolve_readable_store(
     return resolved
 
 
+def can_read_store(
+    *,
+    store: str,
+    registry: StoreRegistry,
+    settings: RagReaderSettings,
+) -> bool:
+    """Whether this credential may read `store` - the same question
+    retrieve() asks, answered as a plain True/False instead of by raising.
+
+    Exists for callers that need to CHECK rather than search: webui.py's
+    file-serving endpoint (which must not hand out a document belonging to a
+    store this credential cannot read) and the stress test. Returning False
+    for both "unknown store" and "not allowed" preserves the uniform-error
+    rule - a caller cannot use this to learn which stores exist.
+    """
+    with _reader_engine(settings).connect() as conn:
+        try:
+            _resolve_readable_store(conn, registry, store)
+        except UnknownStoreError:
+            return False
+
+    return True
+
+
+def store_for_source_path(
+    source_path: str, *, registry: StoreRegistry
+) -> Store | None:
+    """Which store a stored `source_path` belongs to, or None if none claims
+    it.
+
+    A source_path is always "<source_dir>/<something>" for a file-backed store
+    (load_files.py builds it that way), so the owning store is decided by
+    folder prefix - the same rule that decided it at ingestion time, and the
+    same rule a human reading the folder tree would apply.
+
+    Deliberately registry-only and credential-free: this says which store a
+    path BELONGS to, not whether anyone may read it. Callers must still ask
+    can_read_store() before acting on the answer - which is exactly the
+    two-step webui.py's file endpoint performs.
+    """
+    # The LONGEST matching prefix wins, not the first one found: with folders
+    # "public" and "public/extra" declared, "public/extra/x.md" belongs to the
+    # second. Comparing every candidate and keeping the longest is what makes
+    # nested store folders behave the way a reader would expect.
+    best: Store | None = None
+    for store in registry:
+        # A store with no source_dir is fed from somewhere other than a folder
+        # (a CSV export, say), so no file path can belong to it.
+        if not store.source_dir or not source_path.startswith(f"{store.source_dir}/"):
+            continue
+        if best is None or len(store.source_dir) > len(best.source_dir):
+            best = store
+
+    return best
+
+
 def get_chunk_neighbors(
     *,
     store: str,

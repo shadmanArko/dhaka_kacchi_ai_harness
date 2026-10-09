@@ -44,6 +44,11 @@ from fastapi.responses import FileResponse, HTMLResponse
 # name and one this credential may not read - the endpoint below turns it
 # into one 404 either way, preserving that deliberate sameness.
 from rag.config import (
+    # The one folder documents may be served from - imported from config.py
+    # rather than recomputed here, so this endpoint and the loader can never
+    # disagree about where a source_path is relative to (they did have two
+    # copies of this line before 2026-10-09; one is enough).
+    KNOWLEDGE_BASE_DIR,
     UnknownStoreError,
     load_rag_internal_reader_settings,
     load_store_registry,
@@ -51,7 +56,13 @@ from rag.config import (
 # The re-index orchestration that the /api/reindex endpoints below kick
 # off in a background thread (RAG_progress.md decisions #30/#31).
 from rag.reindex import run_reindex
-from rag.retrieval import get_chunk_neighbors, list_stores, retrieve
+from rag.retrieval import (
+    can_read_store,
+    get_chunk_neighbors,
+    list_stores,
+    retrieve,
+    store_for_source_path,
+)
 
 # The exact dropdown choices Ahmad asked for, with 5 as the default -
 # written as one constant so the frontend dropdown and the backend's own
@@ -59,12 +70,11 @@ from rag.retrieval import get_chunk_neighbors, list_stores, retrieve
 ALLOWED_TOP_K_VALUES = (5, 10, 15, 20)
 DEFAULT_TOP_K = 5
 
-# Where Knowledge_Base documents live - resolve() turns this into an
-# absolute path once, up front, so every request's path-safety check
-# below compares against a known-good absolute root rather than a
-# relative one that could be interpreted differently depending on the
-# server process's current working directory.
-KNOWLEDGE_BASE_DIR = (Path(__file__).resolve().parent / "Knowledge_Base").resolve()
+# KNOWLEDGE_BASE_DIR (where documents live - the absolute root every
+# request's path-safety check below compares against) is imported from
+# rag/config.py, alongside the other things this server is configured with.
+# It is resolved to an absolute path there, once, so it cannot be
+# reinterpreted depending on the server process's current working directory.
 
 # File extensions a browser can render natively, inline, without any
 # conversion - used to tell the frontend whether to show an inline
@@ -125,18 +135,19 @@ def _build_reference(row: dict) -> dict:
         }
 
     # Anything else is a file-type source. source_path for these is a
-    # relative path under Knowledge_Base/ (set by load_knowledge_base.py)
+    # relative path under Knowledge_Base/ (set by load_files.py)
     # - /api/file?path=... serves it back, with the same safety check
     # applied to both places so they can never drift apart.
     #
-    # PDF pages encode their page number INTO source_path itself
-    # ("somefile.pdf::page2" - see load_knowledge_base.py's per-page
-    # ingest_source() calls) - Path(...).suffix naively applied to that
-    # whole string returns ".pdf::page2", not ".pdf", because Path only
-    # looks at the LAST dot in the string and there isn't one after
-    # "pdf". Splitting on "::page" first recovers the real underlying
-    # file path before ever asking for its suffix or serving it back.
-    base_path = row["source_path"].split("::page")[0]
+    # A source_path can carry a "::" suffix naming WHICH PART of the file
+    # this chunk came from - "somefile.pdf::page2" for a PDF page,
+    # "brand-book.md::what-we-serve" for a markdown section (load_files.py
+    # ingests one unit per page and per section). Path(...).suffix naively
+    # applied to that whole string returns ".pdf::page2", not ".pdf", because
+    # Path only looks at the LAST dot in the string and there isn't one after
+    # "pdf". Splitting on "::" first recovers the real underlying file path
+    # before ever asking for its suffix or serving it back.
+    base_path = row["source_path"].split("::")[0]
     suffix = Path(base_path).suffix.lower()
     page_number = metadata.get("page_number")
 
@@ -150,7 +161,11 @@ def _build_reference(row: dict) -> dict:
 
     return {
         "kind": "file",
-        "label": row["source_path"],
+        # The FILE's path, not the whole source_path: the "::page2" /
+        # "::what-we-serve" suffix names a part of the file, and it is already
+        # shown as a badge of its own (page number / heading) right next to
+        # this label.
+        "label": base_path,
         "url": file_url,
         "previewable_inline": suffix in _INLINE_PREVIEWABLE_SUFFIXES,
         "heading": metadata.get("heading"),
@@ -254,14 +269,29 @@ def get_file(path: str = Query(..., description="A file's path, relative to Know
     panel can display it (inline for PDF/text, a download for anything
     a browser can't render natively, e.g. .docx/.xlsx).
 
-    SECURITY: this is the one place in rag/ that turns a caller-supplied
-    string into a filesystem path, so it's the one place a path-traversal
-    attack (e.g. path="../../../../Windows/System32/some_file") could read
-    something it shouldn't. Guarded by resolving the full path and
-    checking it's still actually inside KNOWLEDGE_BASE_DIR before ever
-    touching the filesystem - a relative path with ".." segments resolves
-    to somewhere OUTSIDE that directory, and gets rejected here rather
-    than ever being opened.
+    Two independent guards, because this endpoint is the ONE place in the
+    whole subsystem where the public/internal boundary is not enforced by a
+    Postgres grant:
+
+    1. PATH SAFETY. This is the only place in rag/ that turns a caller-supplied
+       string into a filesystem path, so it is the only place a path-traversal
+       attempt (path="../../../../Windows/System32/some_file") could read
+       something it shouldn't. Guarded by resolving the full path and checking
+       it is still inside KNOWLEDGE_BASE_DIR before touching the filesystem.
+
+    2. STORE VISIBILITY. Knowledge_Base/ now holds BOTH tiers side by side -
+       public/brand-book.md and internal/voice-and-rules.md - so "inside the
+       folder" is no longer the same question as "may this caller see it". The
+       path must belong to a store (by folder prefix) AND this server's
+       credential must be able to read that store, asked of Postgres
+       (has_table_privilege) exactly as a search would. A public-facing
+       deployment loads the public credential and therefore cannot fetch
+       internal/ documents, whatever path it asks for - the same structural
+       isolation the tables get, extended to the files the tables point at.
+       Today this server runs with the INTERNAL credential (see
+       _reader_settings above), so both tiers are servable here; the guard is
+       what keeps that from becoming a hole the moment a public surface
+       reuses this endpoint.
     """
     # Combine the requested relative path onto the known-safe root, then
     # resolve() collapses any ".."/"." segments into a final absolute
@@ -273,6 +303,18 @@ def get_file(path: str = Query(..., description="A file's path, relative to Know
     # if it's not, refuse outright rather than ever calling open() on it.
     if not requested.is_relative_to(KNOWLEDGE_BASE_DIR):
         raise HTTPException(status_code=400, detail="invalid path")
+
+    # Which store claims this path (by source_dir prefix), and may this
+    # server's credential read it? Both answers are needed before a single
+    # byte is read. A path that no store claims - facts.yaml, an archived
+    # folder, anything unregistered - is refused by the same 404 as a
+    # nonexistent file, so the endpoint cannot be used to discover what else
+    # is lying around in the folder.
+    store = store_for_source_path(path, registry=_registry)
+    if store is None or not can_read_store(
+        store=store.name, registry=_registry, settings=_reader_settings
+    ):
+        raise HTTPException(status_code=404, detail="file not found")
 
     if not requested.is_file():
         raise HTTPException(status_code=404, detail="file not found")
@@ -450,7 +492,7 @@ _PAGE_HTML = """
         <button onclick="runSearch()">Search</button>
       </div>
       <div class="reindex-row">
-        <button id="reindex-btn" onclick="startReindex()" title="Re-embed every store from the local files (social_share CSV + Knowledge_Base)">re-index</button>
+        <button id="reindex-btn" onclick="startReindex()" title="Re-embed every store from its folder on disk (Knowledge_Base/public + Knowledge_Base/internal)">re-index</button>
         <span id="reindex-status"></span>
       </div>
       <div id="status"></div>

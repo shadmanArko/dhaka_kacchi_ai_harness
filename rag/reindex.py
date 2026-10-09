@@ -4,10 +4,10 @@ One call that walks the store registry (rag/stores.toml) and, for every store
 that has a loader, runs load + prune (RAG_progress.md decisions #25 and #30).
 
 "Re-index" here deliberately means: reprocess what is already on disk
-(`rag/data/social_post_metrics.csv` and `rag/Knowledge_Base/` as they
-currently sit) - never reach out to the live `social_share` database or the
-SSH tunnel. Pulling a fresh CSV export, or dropping new files into
-Knowledge_Base/, stays a separate, manual step (decision #25).
+(`rag/Knowledge_Base/public/`, `rag/Knowledge_Base/internal/`, and - if it is
+ever re-registered - `rag/data/social_post_metrics.csv`) as they currently
+sit, never reach out to any live database. Pulling a fresh export, or dropping
+new files into a store folder, stays a separate, manual step (decision #25).
 
 This is what webui.py's re-index button calls. It is also runnable directly
 from the terminal via `uv run python -m rag.reindex` (optionally naming a
@@ -28,11 +28,15 @@ from __future__ import annotations
 
 import sys
 
-# Both corpus modules imported whole (not their individual functions) so the
-# call sites below read "load_social_share.load_all()" - and so the
-# orchestration here can be exercised with stubs, without activating the real
-# (slow) loaders.
-from rag import load_knowledge_base, load_social_share
+# Both loader modules imported whole (not their individual functions) so the
+# call sites below read "load_files.load_store(...)" - and so the orchestration
+# here can be exercised with stubs, without activating the real (slow) loaders.
+#
+# load_social_share is imported even though its store is currently
+# unregistered: the map below is the single place a store is wired to its
+# loader, and keeping the module importable is what makes re-registering it a
+# one-line change (see rag/RUNBOOK.md, "Removing a store").
+from rag import load_files, load_social_share
 
 # UnknownStoreError is raised when a caller names a store that is not in the
 # registry - for this operator-facing tool that is a straight error, not
@@ -42,14 +46,23 @@ from rag.config import ConfigError, UnknownStoreError, load_store_registry
 # Which module knows how to load each store, keyed by LOGICAL store name.
 #
 # This is the one place that maps a registry entry to the code that fills it.
-# Adding a store that reuses an existing loader's format means touching only
-# stores.toml; adding a store whose source is a NEW kind of thing means adding
-# its loader module here as well. Both are small, explicit changes - which is
-# the point of keeping this map in code rather than trying to infer a loader
-# from the config.
+# Adding a store whose content is a FOLDER means touching only stores.toml
+# (load_files reads the folder named by the store's own source_dir); adding a
+# store whose source is a NEW kind of thing means adding its loader module
+# here as well, plus one line below.
+#
+# Deliberately in code rather than in the config: a config field naming an
+# importable module is a much bigger thing to get wrong (it is a name that
+# decides which code runs) than a dictionary here is to read.
 _LOADER_MODULES = {
+    # Both brand stores are folders of markdown, so both use the generic file
+    # loader - they differ only in which folder they read, which is config.
+    "brand_book": load_files,
+    "voice_and_rules": load_files,
+    # Unregistered as of 2026-10-09 (its data is queried directly instead).
+    # Left wired up on purpose: re-adding the [stores.social_share] block to
+    # stores.toml restores it with no code change at all.
     "social_share": load_social_share,
-    "knowledge_base": load_knowledge_base,
 }
 
 
@@ -59,9 +72,11 @@ def run_reindex(*, store: str | None = None) -> dict:
     With no arguments, every store in the registry that has a loader is
     processed, in the order stores.toml lists them. Passing `store` names ONE
     logical store and processes only that one - genuinely useful, because a
-    full run re-embeds every chunk of every corpus (roughly 45 minutes for
-    the document corpus alone on this machine), which is wasteful when only
-    one corpus's source data has actually changed.
+    full run re-embeds every chunk of every store, which is wasteful when only
+    one store's source data has actually changed. (With the two brand stores
+    that is a few seconds; when the test corpora were registered it was closer
+    to 45 minutes for the document store alone, which is where the option came
+    from.)
 
     Load-before-prune per store, exactly the order each loader's own main()
     uses. That order matters for the prune's safety: the load has just
@@ -84,10 +99,11 @@ def run_reindex(*, store: str | None = None) -> dict:
         }
 
     Deliberately catches NOTHING from the loaders (decision #30): if a load or
-    prune raises - e.g. load_knowledge_base's NotImplementedError for a .docx
-    dropped into the folder - the error goes straight to the caller to
-    surface. A partially finished re-index is always safe to simply re-run, so
-    failing loudly beats inventing partial-failure bookkeeping at this stage.
+    prune raises - e.g. load_files' NotImplementedError for a .docx dropped
+    into the folder, or its refusal to prune a store whose folder has gone
+    empty - the error goes straight to the caller to surface. A partially
+    finished re-index is always safe to simply re-run, so failing loudly beats
+    inventing partial-failure bookkeeping at this stage.
     """
     # The registry is the source of truth for WHICH stores exist and in what
     # order they should be processed.
@@ -120,13 +136,16 @@ def run_reindex(*, store: str | None = None) -> dict:
             continue
 
         # Load first, then prune - see the docstring above for why this order
-        # is what makes the prune safe. Both loaders return a stats dict from
-        # load_all() with their own format-specific keys (posts_ingested for
-        # the CSV corpus, files_ingested for documents), but they share
-        # `total_chunks_written`, which is the one number this orchestrator
-        # needs.
-        load_stats = loader.load_all()
-        deleted = loader.prune_orphaned()
+        # is what makes the prune safe. Both loaders implement the same two
+        # functions taking the Store being processed (load_store /
+        # prune_orphaned), which is what lets this loop stay ignorant of
+        # whether it is driving a folder of markdown or a CSV export. They
+        # return stats dicts with their own format-specific keys
+        # (posts_ingested for the CSV corpus, files_ingested for a folder),
+        # but they share `total_chunks_written`, which is the one number this
+        # orchestrator needs.
+        load_stats = loader.load_store(target, registry=registry)
+        deleted = loader.prune_orphaned(target)
 
         results.append(
             {

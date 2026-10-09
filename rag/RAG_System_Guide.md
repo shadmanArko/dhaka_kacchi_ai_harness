@@ -21,6 +21,17 @@ against a real database. The exact things that are *not* built yet (there are
 three) are listed explicitly in §2.6 — nothing in this document claims a feature
 that isn't there.
 
+> **Update — 2026-10-09.** The subsystem moved from one vector table to two
+> (one per audience: `brand_book` public, `voice_and_rules` internal), with the
+> public/internal boundary enforced by Postgres grants rather than by code.
+> Parts 1, 3 and 5 of this guide still describe how everything works — chunking,
+> embedding, hybrid retrieval and RRF are unchanged — but wherever it says
+> "the `chunks` table" read "one table per store", and for the current store
+> list, the setup commands and the operating procedures use **`rag/RUNBOOK.md`**
+> (which is current) plus `rag/MULTI_STORE_DESIGN.md` (the design). Part 4's
+> setup steps are superseded by the runbook's §2. Part 2 is the historical
+> design as of 2026-10-06, kept because the reasoning still holds.
+
 ---
 
 ## Contents

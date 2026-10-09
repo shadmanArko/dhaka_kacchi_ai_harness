@@ -1,19 +1,18 @@
 """Create the RAG vector tables inside dhaka_kacchi_rag, and grant each role
 exactly the privileges it needs on them.
 
-Two generations of table live side by side while the multi-store migration is
-in progress (see rag/MULTI_STORE_DESIGN.md):
-
-  * the LEGACY single table, `chunks`, holding both corpora, and
-  * one table PER STORE, named by rag/stores.toml, each with a visibility
-    tier that decides which reader roles are granted SELECT on it.
+ONE table PER STORE, named by rag/stores.toml, each with a visibility tier
+that decides which reader roles are granted SELECT on it (see
+rag/MULTI_STORE_DESIGN.md). The pre-multi-store single `chunks` table - which
+held every corpus at once and could not express a per-corpus visibility - was
+dropped on 2026-10-09; this script no longer creates it.
 
 Everything here is registry-driven: adding a store to rag/stores.toml and
 re-running this script creates its table and grants the right roles, with no
 code change.
 
 Run this AFTER rag/bootstrap_db.py - it depends on the database, the `vector`
-extension, and all four roles already existing. See RAG_progress.md decision
+extension, and all three roles already existing. See RAG_progress.md decision
 #10 for the column-by-column reasoning behind this table shape, and decision
 #11 for why this is a plain script rather than an Alembic migration.
 
@@ -37,7 +36,6 @@ from rag.bootstrap_db import (
     RAG_DATABASE_NAME,
     RAG_INTERNAL_READER_ROLE,
     RAG_PUBLIC_READER_ROLE,
-    RAG_READER_ROLE,
     RAG_WRITER_ROLE,
     admin_engine_on_rag_db,
     quote_identifier,
@@ -63,11 +61,6 @@ from rag.config import (
 # exactly what text+CHECK (over a native ENUM) is FOR: widening this later
 # without a breaking migration.
 SOURCE_TYPES = ("pdf", "markdown", "docx", "txt", "csv", "xlsx", "html")
-
-# The LEGACY single table's name. Kept as a named constant (rather than being
-# passed to _create_store_table directly) so the day this table is dropped,
-# a search for this name finds every remaining reference.
-LEGACY_CHUNKS_TABLE = "chunks"
 
 
 def _source_type_values_sql() -> str:
@@ -201,22 +194,6 @@ def _create_store_table(settings: RagAdminSettings, *, table: str) -> None:
         )
 
 
-def create_chunks_table(settings: RagAdminSettings) -> int:
-    """Create the LEGACY single table, `chunks`.
-
-    Kept only so the existing system keeps working while the multi-store
-    migration is in progress. It holds both corpora today and is dropped once
-    the per-store tables have been populated and verified (design doc phase
-    6) - at which point this function and `grant_privileges` below are
-    deleted together.
-    """
-    # Same shape as every store table - literally the same code, pointed at
-    # the legacy name.
-    _create_store_table(settings, table=LEGACY_CHUNKS_TABLE)
-    print(f"ensured legacy table {LEGACY_CHUNKS_TABLE!r} exists in {RAG_DATABASE_NAME}")
-    return 0
-
-
 def create_store_tables(settings: RagAdminSettings, registry: StoreRegistry) -> int:
     """Create one table per store in the registry.
 
@@ -229,64 +206,6 @@ def create_store_tables(settings: RagAdminSettings, registry: StoreRegistry) -> 
         # Say which LOGICAL store mapped to which physical table, so the
         # output double-checks the config's own indirection.
         print(f"ensured store {store.name!r} -> table {store.table!r} exists")
-    return 0
-
-
-def grant_privileges(settings: RagAdminSettings) -> int:
-    """LEGACY grants: rag_writer and rag_reader, on the single `chunks` table.
-
-    This is the step that enforces the original "agents can only read, never
-    write" rule from RAG_progress.md decision #4/#7 - role creation alone
-    (bootstrap_db.py) doesn't grant any table access by itself.
-
-    Retired together with `chunks` itself, once the migration completes; the
-    multi-store equivalent is `grant_store_privileges` below.
-    """
-    with admin_engine_on_rag_db(settings).begin() as conn:
-        # A role needs CONNECT on the database before anything else it's
-        # granted can matter - stated explicitly here rather than relying on
-        # Postgres' own default (new roles can usually already connect to any
-        # database by default, but writing this out makes the intent visible
-        # in the SQL itself instead of depending on a server-wide default that
-        # could be different on another machine).
-        conn.execute(
-            sa.text(
-                f"GRANT CONNECT ON DATABASE {quote_identifier(RAG_DATABASE_NAME)} "
-                f"TO {quote_identifier(RAG_WRITER_ROLE)}"
-            )
-        )
-        conn.execute(
-            sa.text(
-                f"GRANT CONNECT ON DATABASE {quote_identifier(RAG_DATABASE_NAME)} "
-                f"TO {quote_identifier(RAG_READER_ROLE)}"
-            )
-        )
-        # rag_writer: the recurring ingestion job needs to add new chunks and
-        # update existing ones (the upsert-on-re-ingest behaviour) - SELECT is
-        # included too, because an upsert has to be able to check "does this
-        # row already exist" before deciding whether to INSERT or UPDATE it.
-        # DELETE added 2026-10-02 (RAG_progress.md decision #25) specifically
-        # for the re-index "prune orphaned chunks" step - a deliberate,
-        # confirmed expansion of this role's privileges, not an oversight.
-        # Still no DDL rights of any kind, and still scoped to this one table.
-        conn.execute(
-            sa.text(
-                f"GRANT SELECT, INSERT, UPDATE, DELETE ON {quote_identifier(LEGACY_CHUNKS_TABLE)} "
-                f"TO {quote_identifier(RAG_WRITER_ROLE)}"
-            )
-        )
-        # rag_reader: agents only ever read at query time - SELECT and nothing
-        # else, structurally incapable of changing any row.
-        conn.execute(
-            sa.text(
-                f"GRANT SELECT ON {quote_identifier(LEGACY_CHUNKS_TABLE)} "
-                f"TO {quote_identifier(RAG_READER_ROLE)}"
-            )
-        )
-    print(
-        f"granted {LEGACY_CHUNKS_TABLE!r} privileges to "
-        f"{RAG_WRITER_ROLE!r} and {RAG_READER_ROLE!r}"
-    )
     return 0
 
 
@@ -385,15 +304,6 @@ def main() -> int:
 
     # Create the tables first, then grant privileges on them - grants would
     # fail if a table didn't exist yet, so the order here isn't arbitrary.
-    #
-    # Legacy steps run first and are removed together with the `chunks` table
-    # once the migration is finished (design doc phase 6).
-    for legacy_step in (create_chunks_table, grant_privileges):
-        status = legacy_step(settings)
-        if status != 0:
-            return status
-
-    # Registry-driven steps: these are the ones that survive the migration.
     for store_step in (create_store_tables, grant_store_privileges):
         status = store_step(settings, registry)
         if status != 0:

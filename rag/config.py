@@ -4,18 +4,27 @@ House rule, mirrored from warehouse/config.py: nothing outside this module
 reads os.environ for anything RAG-related. Everything takes a settings
 object. Validation is fail-fast at load time, not at first query.
 
-Three separate loaders, not one combined Settings object (see
-rag/RAG_progress.md decision #8): each consumer gets exactly the credential
-it needs and no others.
+Four loaders, not one combined Settings object (see rag/RAG_progress.md
+decision #8): each consumer gets exactly the credential it needs and no others.
 
-  load_rag_admin_settings()   - one-time setup only (CREATE DATABASE,
-                                 CREATE EXTENSION vector, role creation).
-                                 Never imported by ingestion or agent code.
-  load_rag_writer_settings()  - the recurring chunk-ingestion job. Can
-                                 INSERT/UPDATE the chunks table, nothing
-                                 more.
-  load_rag_reader_settings()  - agent query code at retrieval time.
-                                 Read-only, no write grants at all.
+  load_rag_admin_settings()           - one-time setup only (CREATE DATABASE,
+                                        CREATE EXTENSION vector, role
+                                        creation). Never imported by ingestion
+                                        or agent code.
+  load_rag_writer_settings()          - the recurring chunk-ingestion job.
+                                        Writes every store table, reads none
+                                        for its own purposes.
+  load_rag_public_reader_settings()   - a caller that may read PUBLIC stores
+                                        only. This is what a customer-facing
+                                        process runs with.
+  load_rag_internal_reader_settings() - a caller that may read EVERY store:
+                                        the business's own agents and tools.
+
+The last two share one dataclass (the difference between them is enforced by
+Postgres grants, not by the shape of a Python object - see
+_load_reader_settings below), but each keeps its own env var and its own
+loader, so a process can only ever load the one credential it is meant to
+hold.
 
 This module also owns the STORE REGISTRY: the list of vector stores the
 subsystem knows about, read from rag/stores.toml by load_store_registry().
@@ -388,20 +397,6 @@ def load_rag_internal_reader_settings(
     )
 
 
-def load_rag_reader_settings(environ: Mapping[str, str] | None = None) -> RagReaderSettings:
-    """LEGACY: fail-fast config for the pre-multi-store reader role.
-
-    Reads the original single `chunks` table, which held both corpora. Kept
-    only while the old table is still in use; retired together with it once
-    the migration completes (design doc phase 6).
-    """
-    return _load_reader_settings(
-        environ,
-        var_name="RAG_READER_DATABASE_URL",
-        role_description="read-only rag_reader role",
-    )
-
-
 # ---------------------------------------------------------------------------
 # The store registry
 # ---------------------------------------------------------------------------
@@ -437,6 +432,10 @@ _IDENTIFIER_PATTERN = re.compile(r"^[a-z_][a-z0-9_]*$")
 # Every field a [stores.<name>] block must define. Listed once, here, so the
 # validator below can loop over it instead of repeating five near-identical
 # checks - and so making a field required later is a one-line change.
+#
+# `source_dir` is deliberately NOT in this list: a store can legitimately have
+# no folder at all (one fed from a database export, or populated by hand).
+# Only the file loader insists on it, and it says so itself with a clear error.
 _REQUIRED_STORE_FIELDS = (
     "table",
     "visibility",
@@ -444,6 +443,25 @@ _REQUIRED_STORE_FIELDS = (
     "overlap_tokens",
     "description",
 )
+
+# The folder every store's `source_dir` is relative to. A store's files live
+# under rag/Knowledge_Base/<source_dir>/, which is also what makes a chunk's
+# `source_path` (e.g. "public/brand-book.md") mean the same thing to the
+# loader, the retriever, the web UI's file-serving endpoint and a human
+# reading the database. Resolved once, absolutely, here rather than being
+# recomputed in each loader.
+KNOWLEDGE_BASE_DIR = (Path(__file__).resolve().parent / "Knowledge_Base").resolve()
+
+# What a `source_dir` value is allowed to look like.
+#
+# Same reasoning as _IDENTIFIER_PATTERN above, one layer down: this string
+# becomes a real filesystem path, so it must not be able to point anywhere
+# except a folder under Knowledge_Base/. The pattern allows letters, digits
+# and the three punctuation characters a folder name might reasonably use -
+# but NOT a leading slash (an absolute path), NOT "..", and NOT a Windows
+# drive letter or backslash. Read it as: "one or more path segments, each made
+# of letters, digits, dots, dashes and underscores, joined by forward slashes".
+_SOURCE_DIR_PATTERN = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
 
 
 class UnknownStoreError(LookupError):
@@ -485,6 +503,16 @@ class Store:
     # "public" or "internal". A declaration of intent, checked against the
     # real grants by verify_stores.py, never trusted for access control.
     visibility: str
+    # WHICH FOLDER under rag/Knowledge_Base/ this store's content comes from,
+    # e.g. "public" or "internal" - or None for a store that is not fed from a
+    # folder (one loaded from a database export, or populated by hand).
+    #
+    # The folder is what decides a file's store, and therefore its visibility:
+    # dropping a file into Knowledge_Base/internal/ makes it internal, and no
+    # config edit is involved. That is the whole reason it is a folder rather
+    # than a list of filenames - visibility-by-placement is auditable at a
+    # glance, in the filesystem, by a human who has never read this code.
+    source_dir: str | None
     # How big each chunk should be, measured in the embedding model's own
     # tokens. Read only by the loaders; retrieval never looks at it.
     chunk_size_tokens: int
@@ -624,6 +652,26 @@ def load_store_registry(path: Path | None = None) -> StoreRegistry:
         overlap_tokens = block["overlap_tokens"]
         description = block["description"]
 
+        # source_dir is OPTIONAL - absent means "this store is not fed from a
+        # folder". `.get(None)` rather than `[...]` so a block without it is
+        # valid rather than a KeyError.
+        source_dir = block.get("source_dir")
+
+        # When it IS given, it has to be a safe relative path: this value
+        # becomes a real directory the loader walks (and, in webui.py, the
+        # prefix that decides which files may be served), so an absolute path
+        # or a ".." segment would let the config point the loader at
+        # arbitrary parts of the filesystem. Same spirit as the table-name
+        # check below, applied to a path instead of an SQL identifier.
+        if source_dir is not None and (
+            not isinstance(source_dir, str) or not _SOURCE_DIR_PATTERN.match(source_dir)
+        ):
+            raise ConfigError(
+                f"{stores_path}: [stores.{name}] source_dir {source_dir!r} must be "
+                "a relative path under Knowledge_Base/ using letters, digits, "
+                "'.', '-' and '_' separated by '/' (no leading '/', no '..')."
+            )
+
         # The table name will eventually be spliced into SQL text, so it has
         # to be a plain identifier - see _IDENTIFIER_PATTERN's comment above
         # for why this check exists at all.
@@ -691,6 +739,7 @@ def load_store_registry(path: Path | None = None) -> StoreRegistry:
             name=name,
             table=table,
             visibility=visibility,
+            source_dir=source_dir,
             chunk_size_tokens=chunk_size_tokens,
             overlap_tokens=overlap_tokens,
             description=description,
