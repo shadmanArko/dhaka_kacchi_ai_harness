@@ -5,8 +5,9 @@
 | **Audience** | Whoever is operating this subsystem: Ahmad, a future session of Claude, or anyone taking over |
 | **Covers** | Setting it up from nothing · adding/removing a store · testing it · what breaks and why |
 | **Design** | `rag/MULTI_STORE_DESIGN.md` (why it is shaped this way) · `RAG_progress.md` (every decision, in order) |
-| **Assumes** | Windows (PowerShell), Linux or macOS · `uv` installed · Docker Desktop available |
+| **Assumes** | **Nothing** — §2 starts on a bare machine and installs git, `uv` and Docker Desktop before touching the RAG system. No Python install is needed (see §2.2) |
 | **Shells** | Every command is given for both POSIX shells and PowerShell — see §0 |
+| **Budget** | ~12 GB of free disk and a decent connection. The first run brings down a **~4 GB** Python environment (measured: `.venv` is 4.1 GB, torch is most of it), a ~0.6 GB Postgres image and a ~4.3 GB embedding model |
 
 Everything below is a command you can paste. Where a command produces output
 worth recognising, the expected output is shown.
@@ -17,7 +18,7 @@ worth recognising, the expected output is shown.
 |---|---|
 | [§0](#0-running-these-commands-linux--macos--windows) | Running these commands — which shell each block is for |
 | [§1](#1-what-this-subsystem-is-in-one-page) | What the subsystem is, in one page |
-| [§2](#2-set-up-from-nothing) | Set up from nothing (six steps) |
+| [§2](#2-set-up-from-nothing) | **Set up from nothing** — from a bare machine: install the tools, clone, ingest |
 | [§3](#3-adding-a-store-the-main-how-to) | **Adding a store** — the main how-to |
 | [§4](#4-removing-a-store) | Removing a store |
 | [§5](#5-testing) | Testing — four levels, plus the opt-in scale test |
@@ -120,14 +121,116 @@ rag/
 
 ## 2. Set up from nothing
 
-Six steps, in this order. Each is idempotent — running one twice is safe.
+**This section assumes the machine has nothing on it.** It starts by installing
+the three tools the subsystem needs, then walks from an empty disk to a working
+search page. Every step is idempotent — running one twice is safe, which is also
+why the section works unchanged on a machine that is already set up.
 
-### 2.1 Start the database
+### 2.0 The three prerequisites
 
-**If the container already exists** (it does on this machine) this is the whole
-step. It normally comes back by itself: its restart policy is
-`unless-stopped`, so Docker starts it as soon as Docker Desktop is running.
-Check the policy, and the container's state, with:
+| Tool | What it is for | Check it |
+|---|---|---|
+| **git** | getting the code (§2.1) | `git --version` |
+| **uv** | Python itself, plus the project's 91 packages, in one reproducible lockfile (§2.2). **You do not need to install Python separately** — `uv` fetches and manages the interpreter this project pins (`requires-python = ">=3.12"`) | `uv --version` |
+| **Docker Desktop** | runs the Postgres + pgvector database in a container (§2.3), so nothing is installed system-wide | `docker --version` and `docker ps` |
+
+Install them for your OS — any package manager you already have is fine; the
+one-liners below are the official ones:
+
+**Windows (PowerShell)**
+
+```powershell
+winget install --id Git.Git -e
+winget install --id astral-sh.uv -e
+winget install --id Docker.DockerDesktop -e
+# or the uv standalone installer, if you prefer no package manager:
+# powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+**macOS**
+
+```bash
+brew install git uv
+brew install --cask docker          # Docker Desktop
+# or the uv standalone installer:  curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+**Linux (Debian/Ubuntu)**
+
+```bash
+sudo apt update && sudo apt install -y git
+curl -LsSf https://astral.sh/uv/install.sh | sh
+# Docker Engine (plain `docker run` is all this runbook needs - no compose):
+# https://docs.docker.com/engine/install/   (or Docker Desktop for Linux)
+```
+
+> **Windows users: Docker Desktop needs WSL2.** The installer offers to set it
+> up; if it does not, run `wsl --install` in an **Administrator** PowerShell,
+> reboot, and start Docker Desktop once by hand from the Start menu. Nothing
+> works until the whale icon in the tray stops animating — `docker ps` is the
+> honest test, and it should print a table (possibly empty) rather than an error.
+
+> **Then close and reopen your terminal.** All three installers put programs on
+> `PATH`, and a shell that was already open will not see them — the classic
+> "`uv` is not recognized" after a successful install.
+
+### 2.1 Get the code
+
+```bash
+# Linux · macOS · Windows (identical)
+git clone https://github.com/shadmanArko/dhaka_kacchi_ai_harness
+cd dhaka_kacchi_ai_harness
+git checkout feat/RAG_System_Implementation     # the RAG subsystem lives on this branch
+```
+
+The branch matters: as of 2026-10-09 the RAG work is **not merged to `main`**,
+so a clone that stays on `main` has none of the files this runbook describes.
+Check you are on it with `git branch --show-current`.
+
+### 2.2 Create the Python environment
+
+```bash
+# Linux · macOS · Windows (identical)
+uv sync
+```
+
+One command does three things: it fetches a Python 3.12 for this machine (`uv`
+keeps its own interpreters, so nothing system-wide is touched), creates `.venv`
+in the repo, and installs the project's dependencies — 13 declared directly,
+**91 packages in all** once their own dependencies are counted. **torch** is
+most of the download and most of the result: `.venv` measures **4.1 GB** on the
+machine this was written on, which is why this step takes a few minutes on a
+home connection. `uv.lock` is what makes the result identical on every machine.
+
+Confirm it worked — the RAG code cannot run without all five of these, and the
+failure mode of a half-finished install is an import error that looks cryptic
+(§6.6):
+
+```bash
+# Linux · macOS · Windows (identical)
+uv run python -c "import torch, transformers, sentence_transformers, psycopg, pgvector; print('environment OK')"
+```
+
+### 2.3 Start the database
+
+Two paths — **create it once**, then **start it** from then on. The image is
+`pgvector/pgvector:pg16`, and it ships the `vector` extension (a plain
+`postgres:16` image does not, and `CREATE EXTENSION vector` would fail in §2.5).
+
+**First time on this machine — create the container.** As ONE line, on purpose
+(§0 explains why a `\`-continued block breaks in PowerShell):
+
+```bash
+# Linux · macOS · Windows (identical - docker.exe takes the same arguments)
+docker run -d --name dhaka-kacchi-rag -e POSTGRES_PASSWORD=localdevpassword -p 5434:5432 pgvector/pgvector:pg16
+```
+
+Docker downloads the image (~0.6 GB) on the way past. If you would rather see
+that download fail on its own, `docker pull pgvector/pgvector:pg16` first.
+
+**Every time after that — just start it.** It normally comes back by itself: its
+restart policy is `unless-stopped`, so Docker starts it as soon as Docker
+Desktop is running. Check the policy, and the container's state, with:
 
 ```bash
 # Linux · macOS · Windows (identical)
@@ -150,27 +253,32 @@ ever reads `no` (a container created by hand without `--restart`), set it:
 docker update --restart unless-stopped dhaka-kacchi-rag
 ```
 
-**Only on a machine that has never had it**, create the container:
+> **Host port 5434** is deliberate: 5432 is left alone for whatever other
+> Postgres the machine already has (the warehouse's, another project's). §7 has
+> the same values for connecting a GUI to it.
+
+### 2.4 Fill in `.env`
+
+The repo root holds `.env.example`; copy it to `.env` (git-ignored, so secrets
+never reach git), then edit it.
+
+**Linux · macOS**
 
 ```bash
-# Linux · macOS · Windows (identical - docker.exe takes the same arguments)
-docker run -d --name dhaka-kacchi-rag -e POSTGRES_PASSWORD=localdevpassword -p 5434:5432 pgvector/pgvector:pg16
+cp .env.example .env
 ```
 
-> **One line, never a `\`-continued block.** These pages get read in PowerShell
-> as often as in bash, and `\` is a bash-ism: PowerShell ends the command there
-> and then reads each following line as a command of its own
-> (`-e : The term '-e' is not recognized as the name of a cmdlet…`). That is
-> exactly the failure this line is written to avoid — see §0.
+**Windows (PowerShell)** — `cp` is an alias for `Copy-Item` and works, but the
+native spelling is unambiguous:
 
-> The container is `pgvector/pgvector:pg16` on host port **5434**. The image
-> ships the `vector` extension; a plain `postgres:16` image would not, and
-> `CREATE EXTENSION vector` would fail in step 2.
+```powershell
+Copy-Item .env.example .env
+```
 
-### 2.2 Fill in `.env`
-
-Copy `.env.example` to `.env` at the repo root (one `.env`, shared with the
-warehouse) and set:
+The file covers the whole harness (warehouse included). **For the RAG subsystem
+you only need the four `RAG_*` lines** — everything else can stay as the
+placeholder it ships with, and nothing in `rag/` reads it. Fill in the admin URL
+now, from the password you chose in §2.3:
 
 ```bash
 # file contents, not commands - same on every OS
@@ -180,10 +288,11 @@ RAG_PUBLIC_READER_DATABASE_URL=postgresql://rag_public_reader:...@127.0.0.1:5434
 RAG_INTERNAL_READER_DATABASE_URL=postgresql://rag_internal_reader:...@127.0.0.1:5434/dhaka_kacchi_rag
 ```
 
-Only the **admin** URL is knowable up front. The other three passwords are
-generated by the next step and printed exactly once.
+Only the **admin** URL is knowable up front, because the other three roles do
+not exist yet — the next step creates them and prints their passwords exactly
+once, and you paste them in then.
 
-### 2.3 Create the database, extension and roles
+### 2.5 Create the database, extension and roles
 
 ```bash
 # Linux · macOS · Windows (identical)
@@ -208,7 +317,7 @@ docker exec -it dhaka-kacchi-rag psql -U postgres -c "ALTER ROLE rag_writer PASS
 Re-running this step never resets an existing role's password (it prints
 "already exists, password unchanged").
 
-### 2.4 Create the store tables and their grants
+### 2.6 Create the store tables and their grants
 
 ```bash
 # Linux · macOS · Windows (identical)
@@ -225,7 +334,7 @@ granted 'chunks_voice_and_rules' (internal) -> SELECT to 'rag_internal_reader', 
 That second line is the security model: the public role is granted the public
 table **and simply never mentioned** in the internal one.
 
-### 2.5 Ingest the content
+### 2.7 Ingest the content
 
 ```bash
 # Linux · macOS · Windows (identical)
@@ -233,19 +342,28 @@ uv run python -m rag.reindex
 ```
 
 ```
-brand_book: loaded from Knowledge_Base/public/
-  files ingested: 1
-  files skipped: 0
-  total chunk rows written: N
+brand_book:
+  chunk rows written: 10
   orphaned chunks deleted: 0
-voice_and_rules: loaded from Knowledge_Base/internal/
-  ...
+voice_and_rules:
+  chunk rows written: 12
+  orphaned chunks deleted: 0
+total chunk rows written: 22
+total orphaned chunks deleted: 0
 ```
 
-The first run downloads and loads `BAAI/bge-m3` (~4.3 GB cached, ~2 GB RAM while
-embedding, 85 ms per text on a 6-core laptop). Later runs reuse the cache.
+(Ten chunks from one file is normal, not a bug: markdown is ingested one chunk
+per `##` section, and only two of the brand book's sections are long enough to
+split further — §7.3 explains `chunk_index`, the column that records this.)
 
-### 2.6 Check it, then use it
+**On a machine that has never run this, the first line of this step is a
+download**: `BAAI/bge-m3`, ~4.3 GB, cached under your user profile and reused
+every run after. Give it a few minutes before deciding it has hung — the
+progress bar for the model load appears *after* the download finishes, so a
+silent stretch at the start is normal. While embedding it holds ~2 GB of RAM;
+this pair of stores then takes about 30 seconds to ingest.
+
+### 2.8 Check it, then use it
 
 ```bash
 # Linux · macOS · Windows (identical)
@@ -875,7 +993,7 @@ database, or nothing at all.
 ### 7.1 Which credential to connect with
 
 All four passwords are in `.env` (the admin one is the same value the container
-was created with in §2.1). Which you pick decides what the GUI can even see:
+was created with in §2.3). Which you pick decides what the GUI can even see:
 
 | Connect as | Tables visible | Rights |
 |---|---|---|
@@ -923,6 +1041,37 @@ WHERE table_name LIKE 'chunks%' AND grantee LIKE 'rag%'
 ORDER BY table_name, grantee;
 ```
 
+**What `chunk_index` means, since it is the first thing anyone asks about in a
+grid of rows.** It is *this row's position within its source* — `0` for the
+first piece, `1` for the next, and so on, **restarting at 0 for every new
+`source_path`**. That is why most rows are `0`: a markdown section shorter than
+the store's `chunk_size_tokens` (300, from `stores.toml`) becomes exactly one
+chunk. In the brand book only two sections are long enough to split —
+`3-what-we-serve` (chunk 0, 1, 2) and `6-frequently-asked-questions` (0, 1). To
+see that shape for yourself:
+
+```sql
+-- SQL: paste into any client on any OS (DBeaver, psql, pgAdmin)
+SELECT source_path, count(*) AS chunks, max(chunk_index) AS last_index
+FROM chunks_brand_book GROUP BY source_path ORDER BY source_path;
+```
+
+It does three jobs, which is why it is a column and not a convenience:
+
+1. **Half of the uniqueness key.** `UNIQUE (source_path, chunk_index)` is what
+   makes re-ingesting a document an *upsert* instead of a pile of duplicates —
+   re-run `rag.reindex` and the row counts do not move.
+2. **Order.** `ORDER BY source_path, chunk_index` reconstructs the document as
+   its author wrote it. (Sorting by `chunk_text`, as a GUI will happily let you
+   do, shows rows alphabetically — correct, and useless for reading a document.)
+3. **Neighbour context.** The web UI's "a few words before/after" a match is a
+   lookup of `chunk_index ± 1` for the same `source_path` — no extra storage,
+   because consecutive chunks already share `overlap_tokens` at their boundary.
+
+That overlap is the other thing that surprises people: the tail of chunk `n` is
+deliberately repeated at the start of chunk `n+1`, so a sentence split across a
+chunk boundary is still readable from either chunk.
+
 Two things that look like problems but are not:
 
 * **`embedding` is a `vector(1024)`.** Most GUIs have never heard of pgvector's
@@ -937,7 +1086,7 @@ Two things that look like problems but are not:
 | Symptom | Cause |
 |---|---|
 | connection refused / timeout | Docker Desktop is not running, or the container is stopped → §6.1 |
-| `FATAL: password authentication failed` | wrong password for that role — copy it from `.env`. A reader password that has been lost can only be **reset**, never recovered (§2.3) |
+| `FATAL: password authentication failed` | wrong password for that role — copy it from `.env`. A reader password that has been lost can only be **reset**, never recovered (§2.5) |
 | `FATAL: database "…" does not exist` | typo; the two that exist are `dhaka_kacchi_rag` and `postgres` |
 | connects, but you see none of the vector tables | you are on the wrong port (5432) or in the wrong database — check both |
 | SSL / `server does not support SSL connections` | SSL is off in this container; set the connection's SSL mode to *disable* or *prefer* |
@@ -945,7 +1094,7 @@ Two things that look like problems but are not:
 ### 7.5 Two things about this container worth knowing
 
 * **It is published on every network interface, not just localhost**
-  (`0.0.0.0:5434` above), and its admin password is the placeholder from §2.1.
+  (`0.0.0.0:5434` above), and its admin password is the placeholder from §2.3.
   Anyone on the same network who knows it can read the whole database. Fine on
   a trusted home network; do not leave it running on public wifi, and do not
   reuse that password anywhere real.
@@ -1000,7 +1149,7 @@ uv run python -m rag.bootstrap_db        # database + extension + 3 roles
 uv run python -m rag.schema              # tables + grants, from stores.toml
 
 # --- everyday -----------------------------------------------------------
-docker start dhaka-kacchi-rag            # harmless if already up (see §2.1)
+docker start dhaka-kacchi-rag            # harmless if already up (see §2.3)
 uv run python -m rag.reindex             # re-embed every store from disk
 uv run python -m rag.reindex brand_book  # ...or just one store
 uv run python -m rag.load_files brand_book

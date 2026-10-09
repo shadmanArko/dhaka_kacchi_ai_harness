@@ -176,6 +176,45 @@ def verify_store(conn: sa.Connection, store: Store) -> list[str]:
     return problems
 
 
+def find_unregistered_tables(conn: sa.Connection, registry: StoreRegistry) -> list[str]:
+    """Tables in the database that look like store tables but that NO store
+    in the registry claims.
+
+    This is the other direction of the same drift the checks above look for.
+    Those ask "does every declared store match its grants?"; this asks "is
+    there a table sitting here that nothing declares at all?" - a store that
+    was removed from stores.toml without dropping its table (which is exactly
+    what happened to chunks_knowledge_base on 2026-10-09, deliberately: the
+    rows were kept as an archive), or one created by hand and never declared.
+
+    Reported as a NOTE rather than a failure, because an unregistered table is
+    not dangerous - nothing can search it, since retrieval only ever resolves
+    tables through the registry. But it is exactly the kind of thing that
+    rots silently, so it gets said out loud on every run.
+
+    Matched on the naming convention (the `chunks` prefix every store table
+    shares) rather than on a list, so a hand-made table named some other way
+    is out of scope by design - this is a reminder service, not a schema
+    auditor.
+    """
+    known = {store.table for store in registry}
+    rows = (
+        conn.execute(
+            sa.text(
+                """
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name LIKE 'chunks%'
+                ORDER BY table_name
+                """
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [name for name in rows if name not in known]
+
+
 def verify_stores(settings: RagAdminSettings, registry: StoreRegistry) -> list[str]:
     """Check every store in the registry.
 
@@ -217,6 +256,12 @@ def main() -> int:
 
     problems = verify_stores(settings, registry)
 
+    # Tables nobody declares, reported either way: an unregistered table is
+    # usually a deliberate archive, but it should never be a surprise. Fetched
+    # in its own connection because verify_stores() closes its own.
+    with admin_engine_on_rag_db(settings).connect() as conn:
+        unregistered = find_unregistered_tables(conn, registry)
+
     if problems:
         # Every finding, one per line, so this reads well in a terminal and
         # in CI output alike.
@@ -231,6 +276,16 @@ def main() -> int:
     print(f"OK: {len(registry)} store(s) verified against the real grants")
     for store in registry:
         print(f"  - {store.name} ({store.visibility}) -> {store.table}")
+
+    if unregistered:
+        print()
+        print("NOTES - tables no store declares (not searchable, nothing can reach them):")
+        for table in unregistered:
+            print(
+                f"  - {table}: no [stores.*] block claims it. Either an archive "
+                "(leave it, or DROP TABLE if the data is not wanted) or a store "
+                "that was never registered."
+            )
     return 0
 
 
