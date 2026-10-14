@@ -63,7 +63,7 @@ from collections.abc import Mapping
 # equality checks, a repr) from just a list of fields - used below for the
 # three settings objects, so each one is just "here are its fields", not
 # hand-written boilerplate.
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # `Path` gives us an object-oriented, OS-independent way to build file
 # paths (works the same on Windows and Linux), instead of gluing strings
@@ -747,3 +747,41 @@ def load_store_registry(path: Path | None = None) -> StoreRegistry:
 
     # Hand back the registry, ready to be looked up by logical name.
     return StoreRegistry(stores)
+
+
+# ---------------------------------------------------------------------------
+# The chatbot (rag/chatbot.py)
+# ---------------------------------------------------------------------------
+
+# The chat LLM is reached through OpenRouter's OpenAI-compatible API, so model
+# ids are OpenRouter's ("anthropic/claude-opus-5.5", dots not dashes - see
+# https://openrouter.ai/api/v1/models). CHAT_MODEL overrides the default (e.g.
+# anthropic/claude-haiku-5.5 for the cheapest per-token rate) without a code
+# change; the model should list `reasoning_effort` among its parameters.
+_DEFAULT_CHAT_MODEL = "anthropic/claude-opus-5.5"
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+# Where the live facts (prices, deadlines, fees) live - deliberately OUTSIDE
+# every store folder, see RUNBOOK.md section 6.4.
+FACTS_FILE = KNOWLEDGE_BASE_DIR / "facts.yaml"
+
+
+@dataclass(frozen=True, slots=True)
+class ChatSettings:
+    """Config for rag/chatbot.py's LLM call (via OpenRouter)."""
+
+    model: str
+    api_key: str = field(repr=False)
+
+
+def load_chat_settings(environ: Mapping[str, str] | None = None) -> ChatSettings:
+    """The chat model and API key, from CHAT_MODEL / OPENROUTER_API_KEY.
+
+    A missing key fails here, at startup, rather than on the first question.
+    """
+    environ = _load_environ(environ)
+    model = (environ.get("CHAT_MODEL") or "").strip() or _DEFAULT_CHAT_MODEL
+    api_key = (environ.get("OPENROUTER_API_KEY") or "").strip()
+    if not api_key:
+        raise ConfigError("OPENROUTER_API_KEY is not set - add it to .env (see .env.example).")
+    return ChatSettings(model=model, api_key=api_key)

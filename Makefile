@@ -16,7 +16,7 @@ SEED_REV    := 0012
         ingest-facebook ingest-facebook-dry-run \
         ingest-threads ingest-threads-dry-run \
         run-detectors refresh-social-share \
-        current history sql psql revision lint fmt rag-verify rag-test rag-test-full rag-schema rag-reindex rag-ui
+        current history sql psql revision lint fmt rag-verify rag-test rag-test-full rag-schema rag-reindex rag-ui rag-chat rag-chat-internal rag-chat-web
 
 help:  ## show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -164,3 +164,12 @@ rag-reindex:  ## RAG: re-embed every store from the files on disk
 
 rag-ui:  ## RAG: serve the local search page on http://127.0.0.1:8010
 	$(UV) run uvicorn rag.webui:app --port 8010 --host 127.0.0.1
+
+rag-chat:  ## RAG: LLM chatbot, customer view (public stores only)
+	$(PY) -m rag.chatbot
+
+rag-chat-internal:  ## RAG: LLM chatbot, staff view (all stores)
+	$(PY) -m rag.chatbot --internal
+
+rag-chat-web:  ## RAG: customer chatbot website on http://127.0.0.1:8011
+	$(UV) run uvicorn rag.chat_web:app --port 8011 --host 127.0.0.1
