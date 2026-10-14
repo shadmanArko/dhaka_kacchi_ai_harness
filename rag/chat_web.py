@@ -29,13 +29,16 @@ import threading
 import time
 from collections import OrderedDict, deque
 from datetime import date
+from pathlib import Path
 
 import openai
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
 from rag.chatbot import Chatbot, build_chatbot
+
+_LOGO_FILE = Path(__file__).parent / "static" / "logo.webp"
 
 # Open chats kept in memory; the least recently used is dropped beyond this.
 MAX_SESSIONS = 200
@@ -151,214 +154,247 @@ def index() -> str:
     return _PAGE
 
 
+@app.get("/logo.webp", include_in_schema=False)
+def logo() -> FileResponse:
+    # The business's own logo (gold on transparent, made for a dark page),
+    # copied from dhakakacchi.com so this page matches the website.
+    return FileResponse(
+        _LOGO_FILE, media_type="image/webp", headers={"Cache-Control": "public, max-age=86400"}
+    )
+
+
+# The page mirrors www.dhakakacchi.com's own theme: near-black ink, warm gold,
+# cream text, gold hairlines, 2px corners, Cormorant Garamond display type
+# over DM Sans, tiny wide-tracked uppercase labels. The colour values are the
+# website's own CSS custom properties, copied as-is (oklch).
 _PAGE = r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0b0d">
 <title>Dhaka Kacchi Chat</title>
+<link rel="icon" href="/logo.webp">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,650&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet"
+  href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;1,300;1,400&family=DM+Sans:wght@300;400;500;600&display=swap">
 <style>
   :root {
-    --bg: #f8f2e8;
-    --bg-glow: #f3e3c6;
-    --surface: #fffdf9;
-    --surface-2: #f4ece0;
-    --ink: #2a211b;
-    --ink-soft: #6e6157;
-    --line: #e7dccd;
-    --green: #134e3a;
-    --green-ink: #ffffff;
-    --saffron: #d98e1f;
-    --saffron-soft: #fbecd2;
-    --clay: #a8492a;
-    --shadow: 0 1px 2px rgba(60, 40, 20, .06), 0 12px 32px rgba(60, 40, 20, .08);
-  }
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      --bg: #15120f;
-      --bg-glow: #2a2116;
-      --surface: #1e1a16;
-      --surface-2: #29231d;
-      --ink: #f2e9dd;
-      --ink-soft: #b2a596;
-      --line: #352d25;
-      --green: #2f8a68;
-      --green-ink: #ffffff;
-      --saffron: #f0a83a;
-      --saffron-soft: #3a2c17;
-      --clay: #e07a52;
-      --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 12px 32px rgba(0, 0, 0, .35);
-    }
+    /* www.dhakakacchi.com tokens */
+    --black-ink: oklch(6% .006 275);
+    --deep: oklch(9% .008 80);
+    --surface: oklch(13% .011 80);
+    --gold: oklch(74% .084 82);
+    --gold-2: oklch(87% .055 82);
+    --gold-3: oklch(58% .11 78);
+    --cream: oklch(93% .036 85);
+    --muted-warm: oklch(58% .024 78);
+    --line: oklch(74% .084 82 / .18);
+    --line-strong: oklch(74% .084 82 / .55);
+    --radius: 2px;
+    --serif: "Cormorant Garamond", Georgia, serif;
+    --sans: "DM Sans", system-ui, sans-serif;
+    color-scheme: dark;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
   body {
     margin: 0;
-    font: 400 15.5px/1.55 Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
-    color: var(--ink);
+    font: 300 15.5px/1.6 var(--sans);
+    color: var(--cream);
     background:
-      radial-gradient(900px 500px at 85% -10%, var(--bg-glow), transparent 70%),
-      radial-gradient(700px 420px at -10% 110%, var(--bg-glow), transparent 70%),
-      var(--bg);
+      radial-gradient(60rem 28rem at 50% -8rem, oklch(74% .084 82 / .10), transparent 70%),
+      var(--black-ink);
     background-attachment: fixed;
+    -webkit-font-smoothing: antialiased;
   }
+  ::selection { background: var(--gold); color: var(--black-ink); }
+
   .app {
-    height: 100dvh;
-    max-width: 780px;
-    margin: 0 auto;
-    display: flex;
-    flex-direction: column;
-    padding: 18px 16px 14px;
-    gap: 14px;
+    height: 100dvh; max-width: 820px; margin: 0 auto;
+    display: flex; flex-direction: column; padding: 14px 16px 12px; gap: 14px;
   }
 
-  /* Header */
-  header { display: flex; align-items: center; gap: 14px; }
-  .mark {
-    flex: none; width: 50px; height: 50px; border-radius: 15px;
-    display: grid; place-items: center;
-    background: var(--green); color: var(--saffron);
-    box-shadow: var(--shadow);
+  /* Top bar - logo left, actions right, gold hairline below */
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding-bottom: 12px; border-bottom: 1px solid var(--line);
   }
-  .titles { min-width: 0; flex: 1; }
+  .topbar img { height: 46px; width: auto; display: block; }
+  .actions { display: flex; gap: 8px; }
+  .btn {
+    font: 500 .66rem/1 var(--sans); text-transform: uppercase; letter-spacing: .18em;
+    color: var(--gold); background: transparent; border: 1px solid var(--line-strong);
+    border-radius: var(--radius); padding: 10px 14px; cursor: pointer; text-decoration: none;
+    transition: background .2s, color .2s, border-color .2s; white-space: nowrap;
+  }
+  .btn:hover { border-color: var(--gold); }
+  .btn.solid { background: var(--gold); color: var(--black-ink); border-color: var(--gold); }
+  .btn.solid:hover { background: var(--gold-2); border-color: var(--gold-2); }
+
+  /* Heading - the website's eyebrow + serif headline with a gold italic */
+  .intro { text-align: center; }
+  .eyebrow {
+    display: block; font: 400 .66rem/1.4 var(--sans); text-transform: uppercase;
+    letter-spacing: .3em; color: var(--gold); margin-bottom: 6px;
+  }
   h1 {
-    margin: 0; font: 650 1.35rem/1.15 Fraunces, Georgia, serif; letter-spacing: -.01em;
+    margin: 0; font: 300 clamp(1.7rem, 4.5vw, 2.4rem)/1.1 var(--serif);
+    letter-spacing: -.01em; color: var(--cream);
   }
-  .tagline { margin: 2px 0 0; color: var(--ink-soft); font-size: .9rem; }
-  .new-chat {
-    flex: none; border: 1px solid var(--line); background: var(--surface);
-    color: var(--ink); border-radius: 999px; padding: 8px 14px; font: inherit;
-    font-size: .85rem; font-weight: 500; cursor: pointer;
-    transition: border-color .15s, background .15s;
+  h1 em { font-style: italic; color: var(--gold); }
+  .ornament {
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+    margin-top: 8px; color: var(--gold-3); font: italic 400 .9rem var(--serif); letter-spacing: .12em;
   }
-  .new-chat:hover { border-color: var(--saffron); }
+  .ornament::before, .ornament::after { content: ""; width: 42px; height: 1px; background: var(--line-strong); }
 
-  /* Chat card */
+  /* Chat panel */
   .card {
-    flex: 1; min-height: 0; display: flex; flex-direction: column;
-    background: var(--surface); border: 1px solid var(--line);
-    border-radius: 22px; box-shadow: var(--shadow); overflow: hidden;
+    position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column;
+    background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  }
+  .card::before {  /* thin gold rule across the top, as on the site's cards */
+    content: ""; position: absolute; inset: -1px -1px auto; height: 1px;
+    background: linear-gradient(90deg, transparent, var(--gold), transparent);
   }
   .status {
-    display: flex; align-items: center; gap: 8px; padding: 12px 18px;
-    border-bottom: 1px solid var(--line); font-size: .82rem; color: var(--ink-soft);
+    display: flex; align-items: center; gap: 10px; padding: 12px 18px;
+    border-bottom: 1px solid var(--line);
+    font: 400 .64rem/1 var(--sans); text-transform: uppercase; letter-spacing: .22em; color: var(--muted-warm);
   }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: #2fa36b; box-shadow: 0 0 0 3px rgba(47, 163, 107, .18); }
-  .status strong { color: var(--ink); font-weight: 600; }
+  .status strong { color: var(--gold); font-weight: 500; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--gold); box-shadow: 0 0 0 3px oklch(74% .084 82 / .18); }
+
   .messages {
-    flex: 1; overflow-y: auto; padding: 20px 18px 8px;
-    display: flex; flex-direction: column; gap: 14px; scroll-behavior: smooth;
+    flex: 1; overflow-y: auto; padding: 22px 18px 10px;
+    display: flex; flex-direction: column; gap: 16px; scroll-behavior: smooth;
+    scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent;
   }
-  .row { display: flex; gap: 10px; align-items: flex-end; animation: rise .25s ease-out; }
+  .row { display: flex; gap: 10px; align-items: flex-start; animation: rise .3s ease-out; }
   .row.user { justify-content: flex-end; }
   @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
   .avatar {
-    flex: none; width: 30px; height: 30px; border-radius: 10px;
-    display: grid; place-items: center; background: var(--saffron-soft); color: var(--clay);
+    flex: none; width: 30px; height: 30px; display: grid; place-items: center;
+    border: 1px solid var(--line-strong); border-radius: var(--radius); color: var(--gold); background: var(--deep);
   }
   .bubble {
-    max-width: min(80%, 560px); padding: 11px 15px; border-radius: 18px;
+    max-width: min(80%, 580px); padding: 12px 16px; border-radius: var(--radius);
     overflow-wrap: anywhere; white-space: pre-wrap;
   }
-  .bot .bubble { background: var(--surface-2); border-bottom-left-radius: 6px; }
-  .user .bubble { background: var(--green); color: var(--green-ink); border-bottom-right-radius: 6px; }
-  .bubble a { color: inherit; text-decoration-color: var(--saffron); text-underline-offset: 3px; font-weight: 500; }
-  .bubble strong { font-weight: 600; }
-  .sources { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; }
+  .bot .bubble { background: var(--deep); border: 1px solid var(--line); color: var(--cream); }
+  .user .bubble { background: var(--gold); color: var(--black-ink); font-weight: 400; }
+  .bubble a { color: var(--gold-2); text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
+  .user .bubble a { color: inherit; }
+  .bubble strong { font-weight: 500; color: var(--gold-2); }
+  .user .bubble strong { color: inherit; }
+  .sources { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 0; padding: 0; list-style: none; white-space: normal; }
   .sources li {
-    font-size: .74rem; color: var(--ink-soft); background: var(--surface);
-    border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px; white-space: nowrap;
+    font: 400 .58rem/1 var(--sans); text-transform: uppercase; letter-spacing: .18em;
+    color: var(--gold); border: 1px solid var(--line); border-radius: var(--radius); padding: 5px 8px;
   }
-  .bubble.error { background: transparent; border: 1px dashed var(--clay); color: var(--clay); }
+  .bubble.error { background: transparent; border: 1px dashed oklch(57.7% .245 27.325 / .7); color: var(--gold-2); }
 
-  .typing { display: inline-flex; gap: 5px; padding: 4px 2px; }
-  .typing span {
-    width: 7px; height: 7px; border-radius: 50%; background: var(--ink-soft);
-    animation: blink 1.2s infinite ease-in-out;
-  }
+  .typing { display: inline-flex; gap: 6px; padding: 5px 2px; }
+  .typing span { width: 5px; height: 5px; border-radius: 50%; background: var(--gold); animation: blink 1.2s infinite ease-in-out; }
   .typing span:nth-child(2) { animation-delay: .15s; }
   .typing span:nth-child(3) { animation-delay: .3s; }
-  @keyframes blink { 0%, 80%, 100% { opacity: .25; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-3px); } }
+  @keyframes blink { 0%, 80%, 100% { opacity: .2; } 40% { opacity: 1; } }
 
-  /* Suggestions */
-  .suggestions { display: flex; flex-wrap: wrap; gap: 8px; padding: 4px 18px 12px; }
+  /* Suggested questions - the website's outlined gold tags */
+  .suggestions { display: flex; flex-wrap: wrap; gap: 8px; padding: 4px 18px 14px; }
   .chip {
-    border: 1px solid var(--line); background: var(--surface); color: var(--ink);
-    border-radius: 999px; padding: 7px 13px; font: inherit; font-size: .86rem; cursor: pointer;
-    transition: border-color .15s, background .15s, transform .15s;
+    font: 400 .66rem/1 var(--sans); text-transform: uppercase; letter-spacing: .15em;
+    color: var(--gold); background: transparent; border: 1px solid var(--line-strong);
+    border-radius: var(--radius); padding: 9px 13px; cursor: pointer;
+    transition: background .2s, color .2s, border-color .2s;
   }
-  .chip:hover { border-color: var(--saffron); background: var(--saffron-soft); transform: translateY(-1px); }
+  .chip:hover { background: var(--gold); color: var(--black-ink); border-color: var(--gold); }
 
   /* Composer */
   form {
     display: flex; gap: 10px; align-items: flex-end; padding: 12px;
-    border-top: 1px solid var(--line); background: var(--surface);
+    border-top: 1px solid var(--line); background: var(--deep);
   }
   textarea {
     flex: 1; resize: none; max-height: 140px; min-height: 46px;
-    border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px;
-    font: inherit; color: var(--ink); background: var(--bg); outline: none;
-    transition: border-color .15s, box-shadow .15s;
+    border: 1px solid var(--line-strong); border-radius: var(--radius); padding: 12px 14px;
+    font: 300 15px/1.5 var(--sans); color: var(--cream); background: var(--black-ink); outline: none;
+    transition: border-color .2s, box-shadow .2s;
   }
-  textarea:focus { border-color: var(--saffron); box-shadow: 0 0 0 3px var(--saffron-soft); }
-  textarea::placeholder { color: var(--ink-soft); }
+  textarea:focus { border-color: var(--gold); box-shadow: 0 0 0 3px oklch(74% .084 82 / .15); }
+  textarea::placeholder { color: var(--muted-warm); }
   .send {
-    flex: none; width: 46px; height: 46px; border: 0; border-radius: 14px; cursor: pointer;
-    background: var(--saffron); color: #2a1a05; display: grid; place-items: center;
-    transition: transform .15s, opacity .15s;
+    flex: none; width: 46px; height: 46px; border: 0; border-radius: var(--radius); cursor: pointer;
+    background: var(--gold); color: var(--black-ink); display: grid; place-items: center;
+    transition: background .2s, opacity .2s;
   }
-  .send:hover:not(:disabled) { transform: translateY(-1px); }
-  .send:disabled { opacity: .45; cursor: not-allowed; }
+  .send:hover:not(:disabled) { background: var(--gold-2); }
+  .send:disabled { opacity: .35; cursor: not-allowed; }
 
-  footer { text-align: center; font-size: .76rem; color: var(--ink-soft); }
-  footer a { color: inherit; }
+  footer {
+    text-align: center; font: 400 .6rem/1.6 var(--sans); text-transform: uppercase;
+    letter-spacing: .25em; color: var(--muted-warm);
+  }
+  footer a { color: var(--gold); text-decoration: none; }
 
-  @media (max-width: 520px) {
-    .app { padding: 12px 10px 10px; gap: 10px; }
-    .tagline { display: none; }
+  :focus-visible { outline: 1px solid var(--gold); outline-offset: 2px; }
+  textarea:focus-visible { outline: none; }  /* has its own gold border + glow */
+
+  @media (max-width: 560px) {
+    .app { padding: 10px 10px 8px; gap: 10px; }
+    .eyebrow { letter-spacing: .18em; font-size: .58rem; }
+    .status span.sub { display: none; }
+    .topbar img { height: 38px; }
+    .btn { padding: 9px 10px; letter-spacing: .12em; }
+      .ornament { display: none; }
     .bubble { max-width: 86%; }
-    .new-chat span { display: none; }
+    footer { letter-spacing: .15em; }
   }
+  @media (max-height: 640px) { .intro { display: none; } }
 </style>
 </head>
 <body>
 <div class="app">
-  <header>
-    <div class="mark" aria-hidden="true">
-      <!-- a sealed dum pot -->
-      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M4 10h16"/><path d="M5 10c0 5 2.5 9 7 9s7-4 7-9"/><path d="M9 7c0-1.7 1.3-3 3-3s3 1.3 3 3"/>
-        <path d="M2.5 10h1.5M20 10h1.5"/><path d="M9.5 14c.8.6 1.6.9 2.5.9s1.7-.3 2.5-.9"/>
-      </svg>
+  <header class="topbar">
+    <a href="https://www.dhakakacchi.com/" target="_blank" rel="noopener" aria-label="Dhaka Kacchi Berlin website">
+      <img src="/logo.webp" alt="Dhaka Kacchi Berlin">
+    </a>
+    <div class="actions">
+      <button class="btn" id="newChat" type="button" title="Start a new chat">↺ New chat</button>
+      <a class="btn solid" href="https://www.dhakakacchi.com/" target="_blank" rel="noopener">Order now</a>
     </div>
-    <div class="titles">
-      <h1>Dhaka Kacchi Berlin</h1>
-      <p class="tagline">The real Old Dhaka kacchi, cooked fresh every Saturday in Berlin.</p>
-    </div>
-    <button class="new-chat" id="newChat" type="button" title="Start a new chat">↺ <span>New chat</span></button>
   </header>
 
+  <section class="intro">
+    <span class="eyebrow">Berlin, Germany · Cooked fresh every Saturday</span>
+    <h1>Ask us about your <em>kacchi</em></h1>
+    <div class="ornament">menu · ordering · pickup · delivery</div>
+  </section>
+
   <main class="card">
-    <div class="status"><span class="dot"></span><strong>Kacchi assistant</strong> · menu, ordering, pickup &amp; delivery</div>
+    <div class="status"><span class="dot"></span><strong>Kacchi assistant</strong><span class="sub">· replies in seconds</span></div>
     <div class="messages" id="messages" aria-live="polite"></div>
     <div class="suggestions" id="suggestions"></div>
     <form id="composer" autocomplete="off">
-      <textarea id="input" rows="1" maxlength="500" placeholder="Ask about the kacchi, ordering or delivery…" aria-label="Your message"></textarea>
+      <textarea id="input" rows="1" maxlength="500"
+        placeholder="Ask about the kacchi, ordering or delivery…" aria-label="Your message"></textarea>
       <button class="send" id="send" type="submit" aria-label="Send">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M13 6l6 6-6 6"/></svg>
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M5 12h14"/><path d="M13 6l6 6-6 6"/></svg>
       </button>
     </form>
   </main>
 
-  <footer>AI assistant · prices and times may change · to order, message us on
+  <footer>AI assistant · prices &amp; times may change · order on
     <a href="https://wa.me/4915563583687" target="_blank" rel="noopener">WhatsApp</a></footer>
 </div>
 
 <script>
-  const WELCOME = "Assalamu alaikum, and welcome! 👋\nI can tell you about our Old Dhaka kacchi, how ordering works, pickup and delivery. What would you like to know?";
+  const WELCOME = "Assalamu alaikum, and welcome to Dhaka Kacchi Berlin.\n" +
+    "Ask me about our Old Dhaka kacchi, how ordering works, pickup or delivery.";
   const SUGGESTIONS = [
     "What's in the kacchi?",
     "How much is delivery?",
@@ -376,26 +412,35 @@ _PAGE = r"""<!doctype html>
   let busy = false;
 
   function newId() {
-    return (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2)).replace(/[^A-Za-z0-9-]/g, "");
+    const raw = crypto.randomUUID ? crypto.randomUUID()
+      : String(Date.now()) + Math.random().toString(16).slice(2);
+    return raw.replace(/[^A-Za-z0-9-]/g, "");
   }
   // A fresh chat per page load: the page keeps no transcript, so the server
   // must not either - otherwise a reload would answer with unseen history.
   let sessionId = newId();
 
   function escapeHtml(s) {
-    return s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    const map = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+    return s.replace(/[&<>"']/g, c => map[c]);
   }
   // Escape first, then add the little formatting the bot uses.
   function format(text) {
     let html = escapeHtml(text);
     html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-    html = html.replace(/(https?:\/\/[^\s<]+[^\s<.,;:!?)])/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
-    html = html.replace(/\+49[\d ]{9,16}\d/g, m => '<a href="https://wa.me/' + m.replace(/\D/g, "") + '" target="_blank" rel="noopener">' + m + "</a>");
+    html = html.replace(/(https?:\/\/[^\s<]+[^\s<.,;:!?)])/g,
+      '<a href="$1" target="_blank" rel="noopener">$1</a>');
+    html = html.replace(/\+49[\d ]{9,16}\d/g, m =>
+      '<a href="https://wa.me/' + m.replace(/\D/g, "") + '" target="_blank" rel="noopener">' + m + "</a>");
     html = html.replace(/(^|[\s(])([\w.+-]+@[\w-]+\.[\w.]+)/g, '$1<a href="mailto:$2">$2</a>');
     return html;
   }
 
-  const POT = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10h16"/><path d="M5 10c0 5 2.5 9 7 9s7-4 7-9"/><path d="M9 7c0-1.7 1.3-3 3-3s3 1.3 3 3"/></svg>';
+  // The steaming pot from the logo, as a small gold line icon.
+  const POT = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" ' +
+    'stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M5 12c0 4.5 2.8 8 7 8s7-3.5 7-8"/><path d="M4 12h16"/>' +
+    '<path d="M10 9c-1-1.2.8-2-.2-3.4M13.5 9c-1-1.2.8-2-.2-3.4"/></svg>';
 
   function addMessage(role, text, opts = {}) {
     const row = document.createElement("div");
@@ -439,6 +484,8 @@ _PAGE = r"""<!doctype html>
     $send.disabled = v || !$input.value.trim();
   }
 
+  const WHATSAPP = "+49 155 63583687";
+
   async function send(text) {
     text = text.trim();
     if (!text || busy) return;
@@ -455,7 +502,8 @@ _PAGE = r"""<!doctype html>
       });
       typing.remove();
       if (res.status === 429) {
-        addMessage("bot", "You've asked a lot of questions in a short time - please wait a few minutes and try again. For anything urgent, message us on WhatsApp: +49 155 63583687", { error: true });
+        addMessage("bot", "You've asked a lot of questions in a short time - please wait a few " +
+          "minutes and try again. For anything urgent, message us on WhatsApp: " + WHATSAPP, { error: true });
         return;
       }
       if (!res.ok) throw new Error(String(res.status));
@@ -463,7 +511,8 @@ _PAGE = r"""<!doctype html>
       addMessage("bot", data.reply, { sources: data.sources });
     } catch (e) {
       typing.remove();
-      addMessage("bot", "Sorry, I couldn't answer just now. Please try again in a moment, or message us on WhatsApp: +49 155 63583687", { error: true });
+      addMessage("bot", "Sorry, I couldn't answer just now. Please try again in a moment, " +
+        "or message us on WhatsApp: " + WHATSAPP, { error: true });
     } finally {
       setBusy(false);
       $input.focus();
